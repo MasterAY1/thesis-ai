@@ -2,6 +2,7 @@ services:
   - type: web
     name: thesis-ai-backend
     env: docker
+    rootDir: backend
     region: ohio
     plan: free
     healthCheckPath: /health
