@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+venv/
+env/
+ENV/
+
+# Secrets
+.env
+
+# Uploads
+uploads/

@@ -1,0 +1,115 @@
+{
+  "institution_name": "Nursing and Midwifery Council of Nigeria",
+  "institution_code": "nmcn",
+  "total_marks": 100,
+  "sections": {
+    "Preliminary Pages": {
+      "total": 8,
+      "thesis_key": "abstract",
+      "criteria": {
+        "Cover Page": 0.25,
+        "Title Page": 0.25,
+        "Declaration Page": 0.25,
+        "Certification/Approval Page": 0.25,
+        "Abstract - Introduction": 1,
+        "Abstract - Aim/Purpose of Study": 0.5,
+        "Abstract - Methodology": 1,
+        "Abstract - Results": 1,
+        "Abstract - Conclusion/Recommendation": 1,
+        "Abstract - Keywords (4-6)": 0.5,
+        "Acknowledgment (max 1 page)": 0.5,
+        "Table of Contents": 0.5,
+        "List of Tables": 0.5,
+        "List of Figures": 0.5
+      }
+    },
+    "Chapter One": {
+      "total": 15,
+      "thesis_key": "chapter1",
+      "criteria": {
+        "Background to the Study (broad explanation of key issues)": 3,
+        "Statement of Problem": 2,
+        "Objectives of the Study": 2,
+        "Research Questions/Hypothesis": 2,
+        "Significance of the Study (contribution to profession, health providers, society)": 2,
+        "Scope of Study (variables, location, population)": 2,
+        "Operational Definition of Terms (relate to key concepts and objectives)": 2
+      }
+    },
+    "Chapter Two": {
+      "total": 12,
+      "thesis_key": "chapter2",
+      "criteria": {
+        "Conceptual Review (must address key concepts in topic and objectives)": 3,
+        "Theoretical Review/Framework (theory/framework with link to study)": 1,
+        "Empirical Review (must have relevance to objectives)": 5,
+        "Proper Referencing within text using APA format": 1,
+        "Currency of references (Books 10 years, Journals 5 years)": 2
+      }
+    },
+    "Chapter Three": {
+      "total": 20,
+      "thesis_key": "chapter3",
+      "criteria": {
+        "Research Design": 1,
+        "Setting (geographical location and characteristics)": 2,
+        "Target Population": 1,
+        "Sampling size and formula": 1,
+        "Sampling Technique (method, description, inclusion criteria)": 3,
+        "Instruments for Data Collection (types, nature, item number)": 1,
+        "Validity of Instrument (face and content)": 1,
+        "Reliability of Instrument (test and reliability index)": 3,
+        "Method of Data Collection (administration, duration, total sample)": 3,
+        "Method of Data Analysis (appropriate technique and explanation)": 2,
+        "Ethical Consideration (ethical approval, consent from subjects)": 2
+      }
+    },
+    "Chapter Four": {
+      "total": 15,
+      "thesis_key": "chapter4",
+      "criteria": {
+        "Presentation of Results using tables and figures": 4,
+        "Proper labelling of tables and figures": 3,
+        "Proper description of content of tables and figures": 4,
+        "Answering research questions/hypothesis": 4
+      }
+    },
+    "Chapter Five": {
+      "total": 20,
+      "thesis_key": "chapter5",
+      "criteria": {
+        "Identify key findings": 2,
+        "State implications of findings with literature support": 5,
+        "Align findings with findings of previous studies cited": 2,
+        "Implications of findings to Nursing": 2,
+        "Limitations of the study": 1,
+        "Summary of the study": 2,
+        "Conclusion": 2,
+        "Recommendations": 3,
+        "Suggestions for further studies": 1
+      }
+    },
+    "References and Appendix": {
+      "total": 7,
+      "thesis_key": "references",
+      "criteria": {
+        "Proper use of APA format (7th Edition)": 3,
+        "Alphabetical arrangement": 1,
+        "Proper punctuation": 1,
+        "Appendices (content)": 2
+      }
+    },
+    "Typing Instructions": {
+      "total": 3,
+      "thesis_key": null,
+      "criteria": {
+        "Formatting (Times New Roman, Font 12)": 0.5,
+        "Double line spacing": 0.5,
+        "Paragraphing (block style)": 0.5,
+        "Pagination (central, at bottom)": 0.5,
+        "Quotations (proper format)": 0.5,
+        "Quality of Illustration": 0.5
+      }
+    }
+  }
+}
