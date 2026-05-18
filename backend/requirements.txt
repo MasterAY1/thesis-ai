@@ -6,3 +6,5 @@ python-docx
 pydantic
 google-genai
 python-dotenv
+openai
+httpx

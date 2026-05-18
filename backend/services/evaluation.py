@@ -1,6 +1,6 @@
 import json
 from typing import Dict, Any, List
-from .llm_client import generate_json_response
+from .ai.router import get_router
 from .scoring import calculate_score
 from .rubric_loader import (
     build_section_prompt,
@@ -11,7 +11,8 @@ from .rubric_loader import (
 
 def split_thesis_sections(text: str) -> Dict[str, str]:
     """
-    Uses the centralized LLM client to split the extracted thesis text into strict sections.
+    Uses the AI router to split the extracted thesis text into strict sections.
+    Routed to Gemini (fast extraction task).
     """
     system_prompt = """
     You are an academic document parser. Your task is to take the raw text of a university thesis or final year project and split it into its core sections.
@@ -35,8 +36,13 @@ def split_thesis_sections(text: str) -> Dict[str, str]:
     """
 
     user_prompt = f"Raw Thesis Text:\n{text}"
-    result = generate_json_response(system_prompt, user_prompt)
-    
+
+    router = get_router()
+    result = router.generate(system_prompt, user_prompt, task="extract_sections")
+
+    # Strip router metadata before returning to caller
+    result.pop("_meta", None)
+
     required_keys = ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]
     for key in required_keys:
         if key not in result or result[key] is None:
@@ -45,9 +51,9 @@ def split_thesis_sections(text: str) -> Dict[str, str]:
     return result
 
 
-# ──────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
 # Shared system prompt template (section-specific rubric injected)
-# ──────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
 
 SYSTEM_PROMPT_TEMPLATE = """
 You are a calm, experienced, and professional university supervisor grading an NMCN (Nursing and Midwifery Council of Nigeria) research project.
@@ -105,6 +111,7 @@ Provide your output STRICTLY as a JSON object matching this schema:
 def _evaluate_section(section_name: str, section_text: str, institution: str = "nmcn") -> List[Dict]:
     """
     Evaluates a SINGLE thesis section against only its relevant rubric criteria.
+    Routed to Gemini (standard rubric evaluation task).
     Returns a list of issues found in that section.
     """
     if not section_text or section_text.strip() == "" or section_text.strip() == "Not provided.":
@@ -125,11 +132,18 @@ def _evaluate_section(section_name: str, section_text: str, institution: str = "
     max_chars = 15000 if "Chapter" in section_name else 5000
     user_prompt = f"Evaluate this section of the NMCN research project:\n\n{section_name}:\n{section_text[:max_chars]}"
     
-    ai_result = generate_json_response(system_prompt, user_prompt)
+    router = get_router()
+    ai_result = router.generate(system_prompt, user_prompt, task="section_evaluation")
     
     if "error" in ai_result:
         print(f"Warning: AI evaluation failed for {section_name}: {ai_result['error']}")
         return []
+
+    # Log which provider handled this section
+    meta = ai_result.pop("_meta", {})
+    provider = meta.get("provider", "unknown")
+    latency = meta.get("latency_s", "?")
+    print(f"    [{provider}] {section_name} evaluated in {latency}s")
     
     return ai_result.get("issues", [])
 
@@ -137,7 +151,7 @@ def _evaluate_section(section_name: str, section_text: str, institution: str = "
 def evaluate_thesis(text: str, institution: str = "nmcn") -> Dict[str, Any]:
     """
     Evaluates the thesis section-by-section.
-    Each section only receives its own rubric criteria — no wasted tokens.
+    Each section only receives its own rubric criteria -- no wasted tokens.
     """
     # 1. Extract sections
     sections = split_thesis_sections(text)
@@ -157,7 +171,7 @@ def evaluate_thesis(text: str, institution: str = "nmcn") -> Dict[str, Any]:
             issues = _evaluate_section(rubric_section, section_text, institution)
             all_issues.extend(issues)
     
-    # 4. Cross-Section Validation
+    # 4. Cross-Section Validation (routed to GitHub GPT for complex reasoning)
     from .validation_engine import run_cross_validation
     print("  -> Running Cross-Section Validation...")
     cross_validation_result = run_cross_validation(sections)

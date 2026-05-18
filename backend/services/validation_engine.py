@@ -4,7 +4,7 @@ Runs AFTER individual section evaluations to detect inconsistencies
 between chapters that only emerge when comparing content across sections.
 """
 from typing import Dict, Any, List
-from .llm_client import generate_json_response
+from .ai.router import get_router
 
 
 # ──────────────────────────────────────────────────────────────
@@ -142,7 +142,14 @@ Respond with STRICTLY this JSON schema:
 
     user_prompt = f"Check cross-section consistency:\n{section_context}"
     
-    ai_result = generate_json_response(system_prompt, user_prompt)
+    router = get_router()
+    ai_result = router.generate(system_prompt, user_prompt, task="cross_section_consistency")
+    
+    # Log which provider handled the validation
+    meta = ai_result.pop("_meta", {})
+    provider = meta.get("provider", "unknown")
+    latency = meta.get("latency_s", "?")
+    print(f"    [{provider}] {rule['rule']} validated in {latency}s")
     
     if "error" in ai_result:
         print(f"  Warning: Cross-validation failed for '{rule['rule']}': {ai_result['error']}")
