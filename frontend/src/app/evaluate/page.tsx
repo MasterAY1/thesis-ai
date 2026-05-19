@@ -50,48 +50,74 @@ export default function Evaluate() {
 
     try {
       // Step 1: Wake up Render server (free tier sleeps after inactivity)
-      console.log("Waking up server...");
+      setDebugInfo('Waking up server...');
       try {
         await fetch(`${API_URL}/api/ping`, { signal: AbortSignal.timeout(30000) });
-        console.log("Server is awake.");
       } catch {
-        console.log("Wake-up ping failed, attempting upload anyway...");
+        // Server might already be awake, continue anyway
       }
 
-      // Step 2: Upload and evaluate
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
-
-      console.log("Uploading to:", `${API_URL}/api/evaluate`);
-      const response = await fetch(`${API_URL}/api/evaluate`, {
+      // Step 2: Upload file (returns instantly with job_id)
+      setDebugInfo('Uploading document...');
+      const uploadResponse = await fetch(`${API_URL}/api/evaluate`, {
         method: 'POST',
         body: formData,
-        signal: controller.signal,
+        signal: AbortSignal.timeout(30000),
       });
 
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        throw new Error(errorData?.detail || `Server error (${response.status})`);
+      if (!uploadResponse.ok) {
+        const errorData = await uploadResponse.json().catch(() => null);
+        throw new Error(errorData?.detail || `Upload failed (${uploadResponse.status})`);
       }
 
-      const data = await response.json();
-      
-      localStorage.setItem('thesisData', JSON.stringify(data));
-      
-      router.push('/results');
+      const uploadData = await uploadResponse.json();
+      const jobId = uploadData.job_id;
+
+      if (!jobId) {
+        throw new Error('Server did not return a job ID.');
+      }
+
+      // Step 3: Poll for results every 5 seconds
+      setDebugInfo(`Evaluation started (Job: ${jobId}). AI is analyzing your thesis...`);
+
+      const maxPolls = 120; // 10 minutes max (120 × 5s)
+      for (let i = 0; i < maxPolls; i++) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        const statusResponse = await fetch(`${API_URL}/api/status/${jobId}`, {
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (!statusResponse.ok) {
+          continue; // Retry on transient errors
+        }
+
+        const statusData = await statusResponse.json();
+        setDebugInfo(`Status: ${statusData.progress || statusData.status} (poll ${i + 1})`);
+
+        if (statusData.status === 'completed') {
+          localStorage.setItem('thesisData', JSON.stringify(statusData.results));
+          router.push('/results');
+          return;
+        }
+
+        if (statusData.status === 'failed') {
+          throw new Error(statusData.error || 'Evaluation failed on the server.');
+        }
+      }
+
+      throw new Error('Evaluation timed out after 10 minutes.');
+
     } catch (err: unknown) {
       const error = err as Error;
-      console.error("FULL UPLOAD ERROR:", error);
-      setDebugInfo(`Fetch failed to: ${API_URL}/api/evaluate\nError: ${error.message}\nType: ${error.name}`);
-      
+      console.error("Upload error:", error);
+
       if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-        setError('Evaluation timed out. The AI is still processing — please wait a moment and try again.');
-      } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError') || error.message?.includes('fetch failed')) {
-        setError('Could not connect to the evaluation server. The server may be waking up — please click "Test Connection" first, then try again.');
+        setError('Request timed out. The server may be waking up — click "Test Connection" first, then try again.');
+      } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+        setError('Could not connect to the server. Click "Test Connection" to wake it up first.');
       } else {
-        setError(error.message || 'An unexpected error occurred during evaluation.');
+        setError(error.message || 'An unexpected error occurred.');
       }
     } finally {
       setIsLoading(false);
