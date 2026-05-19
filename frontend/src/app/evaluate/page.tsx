@@ -49,9 +49,20 @@ export default function Evaluate() {
     formData.append('file', file);
 
     try {
+      // Step 1: Wake up Render server (free tier sleeps after inactivity)
+      console.log("Waking up server...");
+      try {
+        await fetch(`${API_URL}/api/ping`, { signal: AbortSignal.timeout(30000) });
+        console.log("Server is awake.");
+      } catch {
+        console.log("Wake-up ping failed, attempting upload anyway...");
+      }
+
+      // Step 2: Upload and evaluate
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
 
+      console.log("Uploading to:", `${API_URL}/api/evaluate`);
       const response = await fetch(`${API_URL}/api/evaluate`, {
         method: 'POST',
         body: formData,
@@ -73,12 +84,12 @@ export default function Evaluate() {
     } catch (err: unknown) {
       const error = err as Error;
       console.error("FULL UPLOAD ERROR:", error);
-      setDebugInfo(`Fetch failed to: ${API_URL}/api/evaluate\nError: ${error.message}`);
+      setDebugInfo(`Fetch failed to: ${API_URL}/api/evaluate\nError: ${error.message}\nType: ${error.name}`);
       
-      if (error.name === 'AbortError') {
-        setError('Evaluation timed out. Your document may be too large. Please try again.');
+      if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+        setError('Evaluation timed out. The AI is still processing — please wait a moment and try again.');
       } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError') || error.message?.includes('fetch failed')) {
-        setError('Could not connect to the evaluation server. Please ensure the backend is running.');
+        setError('Could not connect to the evaluation server. The server may be waking up — please click "Test Connection" first, then try again.');
       } else {
         setError(error.message || 'An unexpected error occurred during evaluation.');
       }
