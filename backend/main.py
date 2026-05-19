@@ -44,13 +44,11 @@ async def add_request_id_and_log(request: Request, call_next):
     logging.setLogRecordFactory(old_factory)
     return response
 
-# Temporarily allow all origins for debugging connectivity
-allowed_origins = ["*"]
-
+# Allow all origins (no credentials needed for file upload API)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
