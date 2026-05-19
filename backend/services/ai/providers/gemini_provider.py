@@ -11,8 +11,9 @@ from .base_provider import BaseProvider
 
 logger = logging.getLogger("thesis_ai.providers.gemini")
 
-# Model fallback chain
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash"]
+# Model fallback chain — gemini-1.5-flash no longer exists
+# The models/ prefix is required by the google-genai SDK
+GEMINI_MODELS = ["models/gemini-2.5-flash", "models/gemini-2.0-flash"]
 
 
 class GeminiProvider(BaseProvider):
@@ -41,7 +42,13 @@ class GeminiProvider(BaseProvider):
             return model_override
         if self._active_model:
             return self._active_model
-        return os.getenv("MODEL_NAME", GEMINI_MODELS[0])
+        env_model = os.getenv("MODEL_NAME", "")
+        if env_model:
+            # Ensure the models/ prefix is present
+            if not env_model.startswith("models/"):
+                env_model = f"models/{env_model}"
+            return env_model
+        return GEMINI_MODELS[0]
 
     def generate(
         self,

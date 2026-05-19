@@ -31,6 +31,11 @@ GEMINI_TASKS = {
     "section_evaluation",
 }
 
+# Tasks that must NEVER fall back to GitHub GPT (payload too large)
+GEMINI_ONLY_TASKS = {
+    "extract_sections",
+}
+
 GITHUB_TASKS = {
     "contradiction_analysis",
     "methodology_validation",
@@ -133,7 +138,19 @@ class AIRouter:
             }
             return result
 
-        # --- Primary failed, try fallback ---
+        # --- Primary failed ---
+        # For GEMINI_ONLY tasks, do NOT fall back to GitHub GPT (payload too large)
+        if task in GEMINI_ONLY_TASKS:
+            logger.error(f"[{task}] {primary.name} failed and task is Gemini-only (no fallback). Error: {result.get('error')}")
+            result["_meta"] = {
+                "provider": "none",
+                "task": task,
+                "fallback_used": False,
+                "reason": "gemini_only_task",
+            }
+            return result
+
+        # --- Try fallback for other tasks ---
         logger.warning(f"[{task}] {primary.name} failed ({result.get('error', 'unknown')}), falling back to {fallback.name}")
 
         start = time.time()
