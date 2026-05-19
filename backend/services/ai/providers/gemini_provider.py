@@ -11,9 +11,13 @@ from .base_provider import BaseProvider
 
 logger = logging.getLogger("thesis_ai.providers.gemini")
 
-# Model fallback chain — gemini-1.5-flash no longer exists
+# Model fallback chain — tries each in order until one works
 # The models/ prefix is required by the google-genai SDK
-GEMINI_MODELS = ["models/gemini-2.5-flash", "models/gemini-2.0-flash"]
+GEMINI_MODELS = [
+    "models/gemini-2.5-flash",       # Primary: best quality
+    "models/gemini-2.0-flash",       # Fallback 1: stable
+    "models/gemini-3.1-flash-lite",  # Fallback 2: fast/cheap
+]
 
 
 class GeminiProvider(BaseProvider):
