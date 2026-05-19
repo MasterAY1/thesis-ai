@@ -1,18 +1,78 @@
+"""
+ThesisAI Evaluation Pipeline — Two-stage extraction with chunking.
+
+Stage 1: Gemini performs lightweight section detection on document chunks.
+Stage 2: Individual sections are sent to providers for rubric grading.
+Cross-validation uses token-safe truncated context.
+
+NEVER sends the entire thesis to GitHub GPT.
+"""
 import json
+import logging
 from typing import Dict, Any, List
 from .ai.router import get_router
 from .scoring import calculate_score
+from .chunking import chunk_text, merge_section_results, estimate_tokens, safe_truncate_for_github
 from .rubric_loader import (
     build_section_prompt,
     get_section_mapping,
     load_rubric,
 )
 
+logger = logging.getLogger("thesis_ai.evaluation")
+
 
 def split_thesis_sections(text: str) -> Dict[str, str]:
     """
-    Uses the AI router to split the extracted thesis text into strict sections.
-    Routed to Gemini (fast extraction task).
+    Two-stage section extraction using document chunking.
+
+    Stage 1: Split document into manageable chunks.
+    Stage 2: Gemini processes each chunk to identify which sections it contains.
+    Stage 3: Merge chunk results into complete sections.
+
+    This prevents sending the entire thesis in a single API call.
+    """
+    logger.info(f"Starting section extraction: {len(text)} chars (~{estimate_tokens(text)} tokens)")
+
+    # Stage 1: Chunk the document
+    chunks = chunk_text(text, chunk_size=12000, overlap=1000)
+    logger.info(f"Document split into {len(chunks)} chunks")
+
+    if len(chunks) <= 1:
+        # Small document — process in one shot (Gemini handles this fine)
+        return _extract_sections_single(text)
+
+    # Stage 2: Process each chunk with Gemini
+    chunk_sections = {}
+    for i, chunk in enumerate(chunks):
+        logger.info(f"Processing chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
+        result = _extract_sections_single(chunk)
+
+        # Merge this chunk's results into the accumulated sections
+        for key in ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]:
+            existing = chunk_sections.get(key, "")
+            new_content = result.get(key, "")
+            if new_content and new_content.strip():
+                # Append new content, avoiding duplication
+                if new_content.strip() not in existing:
+                    chunk_sections[key] = (existing + "\n\n" + new_content).strip()
+
+    # Ensure all required keys exist
+    required_keys = ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]
+    for key in required_keys:
+        if key not in chunk_sections or not chunk_sections[key]:
+            chunk_sections[key] = ""
+
+    total_extracted = sum(len(v) for v in chunk_sections.values())
+    logger.info(f"Section extraction complete: {total_extracted} chars across {sum(1 for v in chunk_sections.values() if v)} sections")
+
+    return chunk_sections
+
+
+def _extract_sections_single(text: str) -> Dict[str, str]:
+    """
+    Extract sections from a single chunk of text using Gemini.
+    This is the core extraction call — used for both single-shot and chunked extraction.
     """
     system_prompt = """
     You are an academic document parser. Your task is to take the raw text of a university thesis or final year project and split it into its core sections.
@@ -47,7 +107,7 @@ def split_thesis_sections(text: str) -> Dict[str, str]:
     for key in required_keys:
         if key not in result or result[key] is None:
             result[key] = ""
-            
+
     return result
 
 
@@ -111,12 +171,13 @@ Provide your output STRICTLY as a JSON object matching this schema:
 def _evaluate_section(section_name: str, section_text: str, institution: str = "nmcn") -> List[Dict]:
     """
     Evaluates a SINGLE thesis section against only its relevant rubric criteria.
+
+    For large sections, uses chunking to split the section and merge results.
     Routed to Gemini (standard rubric evaluation task).
-    Returns a list of issues found in that section.
     """
     if not section_text or section_text.strip() == "" or section_text.strip() == "Not provided.":
         return []
-    
+
     rubric_criteria = build_section_prompt(section_name, institution)
     rubric_data = load_rubric(institution)
     section_data = rubric_data["sections"].get(section_name, {})
@@ -127,41 +188,70 @@ def _evaluate_section(section_name: str, section_text: str, institution: str = "
         section_name=section_name,
         max_marks=max_marks,
     )
-    
-    # Truncate section text to a safe limit
-    max_chars = 15000 if "Chapter" in section_name else 5000
-    user_prompt = f"Evaluate this section of the NMCN research project:\n\n{section_name}:\n{section_text[:max_chars]}"
-    
-    router = get_router()
-    ai_result = router.generate(system_prompt, user_prompt, task="section_evaluation")
-    
-    if "error" in ai_result:
-        print(f"Warning: AI evaluation failed for {section_name}: {ai_result['error']}")
-        return []
 
-    # Log which provider handled this section
-    meta = ai_result.pop("_meta", {})
-    provider = meta.get("provider", "unknown")
-    latency = meta.get("latency_s", "?")
-    print(f"    [{provider}] {section_name} evaluated in {latency}s")
-    
-    return ai_result.get("issues", [])
+    # Truncate section text to a safe limit for the provider
+    max_chars = 15000 if "Chapter" in section_name else 5000
+    truncated_text = section_text[:max_chars]
+
+    # If text is still very large, chunk it and merge results
+    section_chunks = chunk_text(truncated_text, chunk_size=6000, overlap=500)
+
+    if len(section_chunks) <= 1:
+        # Single chunk — standard evaluation
+        user_prompt = f"Evaluate this section of the NMCN research project:\n\n{section_name}:\n{truncated_text}"
+
+        router = get_router()
+        ai_result = router.generate(system_prompt, user_prompt, task="section_evaluation")
+
+        if "error" in ai_result:
+            logger.warning(f"AI evaluation failed for {section_name}: {ai_result['error']}")
+            return []
+
+        meta = ai_result.pop("_meta", {})
+        provider = meta.get("provider", "unknown")
+        latency = meta.get("latency_s", "?")
+        logger.info(f"[{provider}] {section_name} evaluated in {latency}s")
+        print(f"    [{provider}] {section_name} evaluated in {latency}s")
+
+        return ai_result.get("issues", [])
+    else:
+        # Multiple chunks — evaluate each and merge
+        logger.info(f"{section_name}: {len(section_chunks)} chunks for evaluation")
+        chunk_results = []
+        router = get_router()
+
+        for i, chunk in enumerate(section_chunks):
+            user_prompt = f"Evaluate this section of the NMCN research project (part {i + 1}/{len(section_chunks)}):\n\n{section_name}:\n{chunk}"
+            ai_result = router.generate(system_prompt, user_prompt, task="section_evaluation")
+
+            if "error" not in ai_result:
+                meta = ai_result.pop("_meta", {})
+                provider = meta.get("provider", "unknown")
+                latency = meta.get("latency_s", "?")
+                logger.info(f"[{provider}] {section_name} chunk {i + 1} in {latency}s")
+                chunk_results.append(ai_result)
+
+        merged = merge_section_results(chunk_results)
+        print(f"    [chunked] {section_name}: {len(merged.get('issues', []))} issues from {len(section_chunks)} chunks")
+        return merged.get("issues", [])
 
 
 def evaluate_thesis(text: str, institution: str = "nmcn") -> Dict[str, Any]:
     """
-    Evaluates the thesis section-by-section.
+    Evaluates the thesis section-by-section with chunking support.
     Each section only receives its own rubric criteria -- no wasted tokens.
     """
-    # 1. Extract sections
+    logger.info(f"Starting thesis evaluation: {len(text)} chars (~{estimate_tokens(text)} tokens)")
+
+    # 1. Extract sections (uses chunking for large documents)
     sections = split_thesis_sections(text)
-    
+
     if "error" in sections:
         return sections
 
     # 2. Get section mapping (thesis_key -> rubric section name)
     section_map = get_section_mapping(institution)
-    
+
     # 3. Evaluate each section independently with only its rubric
     all_issues = []
     for thesis_key, rubric_section in section_map.items():
@@ -170,20 +260,22 @@ def evaluate_thesis(text: str, institution: str = "nmcn") -> Dict[str, Any]:
             print(f"  -> Evaluating: {rubric_section}...")
             issues = _evaluate_section(rubric_section, section_text, institution)
             all_issues.extend(issues)
-    
-    # 4. Cross-Section Validation (routed to GitHub GPT for complex reasoning)
+
+    # 4. Cross-Section Validation (routed to GitHub GPT with token-safe context)
     from .validation_engine import run_cross_validation
     print("  -> Running Cross-Section Validation...")
     cross_validation_result = run_cross_validation(sections)
-    
+
     # 5. Deterministic Python Scoring
     scoring_result = calculate_score(all_issues, institution)
-    
+
     # Apply cross-validation deductions
     scoring_result["overall_score"] -= cross_validation_result["total_deductions"]
     scoring_result["cross_validation"] = cross_validation_result
-    
+
     # Attach sections for UI
     scoring_result["sections"] = sections
     scoring_result["institution"] = institution
+
+    logger.info(f"Evaluation complete. Score: {scoring_result.get('overall_score', 'N/A')}")
     return scoring_result

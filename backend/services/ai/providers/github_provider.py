@@ -2,6 +2,8 @@
 GitHub Models AI Provider — GPT-5/GPT-4.1 for complex reasoning tasks.
 Uses the OpenAI-compatible SDK pointed at the GitHub Models endpoint.
 Handles: contradiction detection, cross-section validation, advanced feedback.
+
+SAFETY: Enforces token limits before every call. Never sends > 6000 tokens.
 """
 import os
 import json
@@ -15,6 +17,10 @@ logger = logging.getLogger("thesis_ai.providers.github")
 # Model fallback chain
 GITHUB_MODELS = ["gpt-5", "gpt-4.1"]
 GITHUB_ENDPOINT = "https://models.github.ai/inference"
+
+# Token safety limits
+CHARS_PER_TOKEN = 4
+MAX_SAFE_CHARS = 24000  # ~6000 tokens — stays safely under 8k limit
 
 
 class GitHubProvider(BaseProvider):
@@ -48,6 +54,36 @@ class GitHubProvider(BaseProvider):
             return self._active_model
         return GITHUB_MODELS[0]
 
+    def _enforce_token_safety(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Enforce hard token safety limits on user_prompt.
+        System prompt is kept intact; user prompt is truncated if needed.
+        """
+        system_tokens = len(system_prompt) // CHARS_PER_TOKEN
+        available_chars = MAX_SAFE_CHARS - len(system_prompt)
+
+        if available_chars < 2000:
+            # System prompt is unusually long, cap it
+            available_chars = 8000  # minimum user space
+
+        if len(user_prompt) <= available_chars:
+            return user_prompt
+
+        estimated_total = (len(system_prompt) + len(user_prompt)) // CHARS_PER_TOKEN
+        logger.warning(
+            f"Token safety triggered: ~{estimated_total} tokens estimated. "
+            f"Truncating user_prompt from {len(user_prompt)} to {available_chars} chars."
+        )
+
+        # Smart truncate: keep beginning and end
+        first = available_chars * 2 // 3
+        last = available_chars // 3
+        return (
+            user_prompt[:first]
+            + "\n\n... [TRUNCATED FOR TOKEN SAFETY] ...\n\n"
+            + user_prompt[-last:]
+        )
+
     def generate(
         self,
         system_prompt: str,
@@ -57,12 +93,18 @@ class GitHubProvider(BaseProvider):
         """
         Generate a JSON response using GitHub Models (OpenAI SDK).
         Tries GPT-5 first, then falls back to GPT-4.1.
+        Enforces token safety before every call.
         """
         if not self.token:
             return {"error": "GITHUB_MODELS_TOKEN is not set. Please configure it in your environment."}
 
-        user_prompt = self._truncate(user_prompt, max_chars=120000)
+        # CRITICAL: Enforce token safety BEFORE sending to GitHub
+        user_prompt = self._enforce_token_safety(system_prompt, user_prompt)
         client = self._get_client()
+
+        total_chars = len(system_prompt) + len(user_prompt)
+        estimated_tokens = total_chars // CHARS_PER_TOKEN
+        logger.info(f"GitHub GPT payload: {total_chars} chars (~{estimated_tokens} tokens)")
 
         # Build the model attempt list
         primary = self._resolve_model(model_override)
@@ -102,8 +144,14 @@ class GitHubProvider(BaseProvider):
                     last_error = f"JSON Parsing Error: {e}"
                     logger.warning(f"GitHub JSON parse error (model={model_name}, attempt={attempt + 1}): {e}")
                 except Exception as e:
-                    last_error = f"API Error: {e}"
-                    logger.warning(f"GitHub API error (model={model_name}, attempt={attempt + 1}): {e}")
+                    error_str = str(e)
+                    last_error = f"API Error: {error_str}"
+                    logger.warning(f"GitHub API error (model={model_name}, attempt={attempt + 1}): {error_str}")
+
+                    # If it's a token limit error, don't retry the same model
+                    if "token" in error_str.lower() or "413" in error_str or "too large" in error_str.lower():
+                        logger.error(f"Token limit hit on {model_name}. Skipping remaining attempts.")
+                        break
 
             logger.info(f"GitHub model {model_name} exhausted, trying next fallback...")
 

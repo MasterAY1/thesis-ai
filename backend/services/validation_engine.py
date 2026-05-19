@@ -2,9 +2,16 @@
 Cross-Section Validation Engine
 Runs AFTER individual section evaluations to detect inconsistencies
 between chapters that only emerge when comparing content across sections.
+
+Token Safety: Each cross-validation call is truncated to fit within
+GitHub GPT's limits before being sent.
 """
+import logging
 from typing import Dict, Any, List
 from .ai.router import get_router
+from .chunking import safe_truncate_for_github, estimate_tokens
+
+logger = logging.getLogger("thesis_ai.validation")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -99,14 +106,20 @@ def run_cross_validation(sections: Dict[str, str]) -> Dict[str, Any]:
 
 
 def _validate_rule(rule: Dict, sections: Dict[str, str]) -> Dict[str, Any]:
-    """Runs a single cross-section validation rule via AI."""
+    """Runs a single cross-section validation rule via AI with token-safe context."""
     
-    # Build context from relevant sections (truncated)
+    # Build context from relevant sections — cap each section to 3000 chars
+    # This keeps combined context well within GitHub GPT limits
     section_context = ""
     for key in rule["sections_needed"]:
         label = _section_label(key)
-        text = sections.get(key, "")[:8000]
+        text = sections.get(key, "")[:3000]
         section_context += f"\n{label}:\n{text}\n"
+    
+    # Apply token safety to the full combined context
+    section_context = safe_truncate_for_github(section_context)
+    total_tokens = estimate_tokens(section_context)
+    logger.info(f"Cross-validation '{rule['id']}': {len(section_context)} chars (~{total_tokens} tokens)")
     
     system_prompt = f"""
 You are a calm, professional academic reviewer performing a cross-section consistency check on a research project.
