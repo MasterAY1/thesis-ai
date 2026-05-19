@@ -11,6 +11,10 @@ router = APIRouter()
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+@router.get("/ping")
+def ping_server():
+    return {"message": "pong"}
+
 @router.post("/evaluate")
 async def evaluate_document(file: UploadFile = File(...)):
     if not (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith('.docx')):

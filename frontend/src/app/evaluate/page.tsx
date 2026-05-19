@@ -11,6 +11,7 @@ export default function Evaluate() {
   const [isLoading, setIsLoading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string | null>(null);
   const router = useRouter();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -42,6 +43,7 @@ export default function Evaluate() {
 
     setIsLoading(true);
     setError(null);
+    setDebugInfo(null);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -70,16 +72,35 @@ export default function Evaluate() {
       router.push('/results');
     } catch (err: unknown) {
       const error = err as Error;
-      console.error(error);
+      console.error("FULL UPLOAD ERROR:", error);
+      setDebugInfo(`Fetch failed to: ${API_URL}/api/evaluate\nError: ${error.message}`);
+      
       if (error.name === 'AbortError') {
         setError('Evaluation timed out. Your document may be too large. Please try again.');
-      } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+      } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError') || error.message?.includes('fetch failed')) {
         setError('Could not connect to the evaluation server. Please ensure the backend is running.');
       } else {
         setError(error.message || 'An unexpected error occurred during evaluation.');
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handlePing = async () => {
+    try {
+      setDebugInfo('Pinging...');
+      const start = Date.now();
+      const res = await fetch(`${API_URL}/api/ping`);
+      const text = await res.text();
+      const time = Date.now() - start;
+      if (res.ok) {
+        setDebugInfo(`✅ Ping successful in ${time}ms! Response: ${text}`);
+      } else {
+        setDebugInfo(`❌ Ping failed (${res.status}): ${text}`);
+      }
+    } catch (err: any) {
+      setDebugInfo(`❌ Ping fetch error: ${err.message}\nURL: ${API_URL}/api/ping`);
     }
   };
 
@@ -122,6 +143,15 @@ export default function Evaluate() {
           <div className="text-center mb-10">
             <h1 className="text-3xl md:text-4xl font-bold mb-3">Upload Your Thesis</h1>
             <p className="text-blue-300/70">Upload your document and receive a detailed, rubric-based evaluation within seconds.</p>
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <span className="text-xs text-white/50 bg-white/5 px-3 py-1 rounded-full font-mono">API: {API_URL}</span>
+              <button onClick={handlePing} className="text-xs text-blue-400 border border-blue-400/30 px-3 py-1 rounded hover:bg-blue-400/10 transition-colors">Test Connection (Ping)</button>
+            </div>
+            {debugInfo && (
+              <div className="mt-3 text-xs text-left text-yellow-300/80 bg-yellow-900/20 p-3 rounded-lg border border-yellow-500/20 whitespace-pre-wrap font-mono mx-auto max-w-lg">
+                {debugInfo}
+              </div>
+            )}
           </div>
 
           {/* Error Banner */}

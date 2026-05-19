@@ -44,11 +44,8 @@ async def add_request_id_and_log(request: Request, call_next):
     logging.setLogRecordFactory(old_factory)
     return response
 
-# Allow requests from Next.js frontend (local and production)
-frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-allowed_origins = [frontend_url]
-if frontend_url != "http://localhost:3000":
-    allowed_origins.append("http://localhost:3000") # Always allow local dev
+# Temporarily allow all origins for debugging connectivity
+allowed_origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
