@@ -11,7 +11,7 @@ export default function Evaluate() {
   const [isLoading, setIsLoading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [debugInfo, setDebugInfo] = useState<string | null>(null);
+  const [progressStatus, setProgressStatus] = useState<string>('');
   const router = useRouter();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -43,14 +43,13 @@ export default function Evaluate() {
 
     setIsLoading(true);
     setError(null);
-    setDebugInfo(null);
+    setProgressStatus('Waking up server...');
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
       // Step 1: Wake up Render server (free tier sleeps after inactivity)
-      setDebugInfo('Waking up server...');
       try {
         await fetch(`${API_URL}/api/ping`, { signal: AbortSignal.timeout(30000) });
       } catch {
@@ -58,7 +57,7 @@ export default function Evaluate() {
       }
 
       // Step 2: Upload file (returns instantly with job_id)
-      setDebugInfo('Uploading document...');
+      setProgressStatus('Uploading document...');
       const uploadResponse = await fetch(`${API_URL}/api/evaluate`, {
         method: 'POST',
         body: formData,
@@ -78,7 +77,7 @@ export default function Evaluate() {
       }
 
       // Step 3: Poll for results every 5 seconds
-      setDebugInfo(`Evaluation started (Job: ${jobId}). AI is analyzing your thesis...`);
+      setProgressStatus('Starting AI evaluation...');
 
       const maxPolls = 120; // 10 minutes max (120 × 5s)
       for (let i = 0; i < maxPolls; i++) {
@@ -93,7 +92,13 @@ export default function Evaluate() {
         }
 
         const statusData = await statusResponse.json();
-        setDebugInfo(`Status: ${statusData.progress || statusData.status} (poll ${i + 1})`);
+        
+        // Show exact background task progress to user
+        if (statusData.progress) {
+          setProgressStatus(statusData.progress);
+        } else {
+          setProgressStatus(`Analyzing thesis (step ${i + 1})...`);
+        }
 
         if (statusData.status === 'completed') {
           localStorage.setItem('thesisData', JSON.stringify(statusData.results));
@@ -113,31 +118,14 @@ export default function Evaluate() {
       console.error("Upload error:", error);
 
       if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-        setError('Request timed out. The server may be waking up — click "Test Connection" first, then try again.');
+        setError('Request timed out. The server may be waking up — please try again.');
       } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
-        setError('Could not connect to the server. Click "Test Connection" to wake it up first.');
+        setError('Could not connect to the evaluation server. Please ensure the backend is running.');
       } else {
         setError(error.message || 'An unexpected error occurred.');
       }
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const handlePing = async () => {
-    try {
-      setDebugInfo('Pinging...');
-      const start = Date.now();
-      const res = await fetch(`${API_URL}/api/ping`);
-      const text = await res.text();
-      const time = Date.now() - start;
-      if (res.ok) {
-        setDebugInfo(`✅ Ping successful in ${time}ms! Response: ${text}`);
-      } else {
-        setDebugInfo(`❌ Ping failed (${res.status}): ${text}`);
-      }
-    } catch (err: any) {
-      setDebugInfo(`❌ Ping fetch error: ${err.message}\nURL: ${API_URL}/api/ping`);
     }
   };
 
@@ -151,7 +139,10 @@ export default function Evaluate() {
             <div className="absolute inset-2 rounded-full border-4 border-transparent border-t-indigo-400 animate-spin" style={{animationDirection: 'reverse', animationDuration: '1.5s'}}></div>
           </div>
           <h2 className="text-2xl font-semibold">Evaluating your thesis...</h2>
-          <p className="text-blue-300/80 text-sm max-w-sm text-center">Parsing document, extracting sections, and grading against the NMCN rubric. This may take 1-2 minutes.</p>
+          <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-xl px-6 py-3 text-center max-w-sm">
+            <p className="text-blue-300 font-mono text-sm">{progressStatus}</p>
+          </div>
+          <p className="text-white/40 text-xs max-w-xs text-center">We are checking structure, rubric alignment, academic rigor, and citation formatting.</p>
           <div className="flex gap-1 mt-2">
             <div className="w-2 h-2 rounded-full bg-blue-400 animate-bounce" style={{animationDelay: '0ms'}}></div>
             <div className="w-2 h-2 rounded-full bg-blue-400 animate-bounce" style={{animationDelay: '150ms'}}></div>
@@ -180,15 +171,6 @@ export default function Evaluate() {
           <div className="text-center mb-10">
             <h1 className="text-3xl md:text-4xl font-bold mb-3">Upload Your Thesis</h1>
             <p className="text-blue-300/70">Upload your document and receive a detailed, rubric-based evaluation within seconds.</p>
-            <div className="mt-4 flex flex-col items-center gap-2">
-              <span className="text-xs text-white/50 bg-white/5 px-3 py-1 rounded-full font-mono">API: {API_URL}</span>
-              <button onClick={handlePing} className="text-xs text-blue-400 border border-blue-400/30 px-3 py-1 rounded hover:bg-blue-400/10 transition-colors">Test Connection (Ping)</button>
-            </div>
-            {debugInfo && (
-              <div className="mt-3 text-xs text-left text-yellow-300/80 bg-yellow-900/20 p-3 rounded-lg border border-yellow-500/20 whitespace-pre-wrap font-mono mx-auto max-w-lg">
-                {debugInfo}
-              </div>
-            )}
           </div>
 
           {/* Error Banner */}
