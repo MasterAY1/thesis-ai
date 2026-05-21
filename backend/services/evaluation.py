@@ -1,15 +1,11 @@
 """
 ThesisAI Evaluation Pipeline — Two-stage extraction with chunking.
-
-Stage 1: Gemini performs lightweight section detection on document chunks.
-Stage 2: Individual sections are sent to providers for rubric grading.
-Cross-validation uses token-safe truncated context.
-
-NEVER sends the entire thesis to GitHub GPT.
+Phase 2: Integrates document classifier, feedback styles, confidence scoring,
+         proposal-aware section skipping.
 """
 import json
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from .ai.router import get_router
 from .scoring import calculate_score
 from .chunking import chunk_text, merge_section_results, estimate_tokens, safe_truncate_for_github
@@ -18,6 +14,8 @@ from .rubric_loader import (
     get_section_mapping,
     load_rubric,
 )
+from .document_classifier import detect_document_type
+from .feedback_styles import get_style_tone_modifier
 
 logger = logging.getLogger("thesis_ai.evaluation")
 
@@ -168,7 +166,12 @@ Provide your output STRICTLY as a JSON object matching this schema:
 """
 
 
-def _evaluate_section(section_name: str, section_text: str, institution: str = "nmcn") -> List[Dict]:
+def _evaluate_section(
+    section_name: str,
+    section_text: str,
+    institution: str = "nmcn",
+    feedback_style: str = "friendly_lecturer",
+) -> List[Dict]:
     """
     Evaluates a SINGLE thesis section against only its relevant rubric criteria.
 
@@ -183,11 +186,12 @@ def _evaluate_section(section_name: str, section_text: str, institution: str = "
     section_data = rubric_data["sections"].get(section_name, {})
     max_marks = section_data.get("total", 0)
 
+    tone_modifier = get_style_tone_modifier(feedback_style)
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         rubric_criteria=rubric_criteria,
         section_name=section_name,
         max_marks=max_marks,
-    )
+    ) + f"\n\nTONE INSTRUCTION: {tone_modifier}"
 
     # Truncate section text to a safe limit for the provider
     max_chars = 15000 if "Chapter" in section_name else 5000
@@ -236,46 +240,124 @@ def _evaluate_section(section_name: str, section_text: str, institution: str = "
         return merged.get("issues", [])
 
 
-def evaluate_thesis(text: str, institution: str = "nmcn") -> Dict[str, Any]:
+def evaluate_thesis(
+    text: str,
+    institution: str = "nmcn",
+    feedback_style: str = "friendly_lecturer",
+) -> Dict[str, Any]:
     """
-    Evaluates the thesis section-by-section with chunking support.
-    Each section only receives its own rubric criteria -- no wasted tokens.
+    Phase 2 evaluation pipeline:
+      - Detects document type (proposal / thesis / seminar / dissertation)
+      - Skips non-applicable sections for proposals
+      - Applies feedback style tone to all AI calls
+      - Attaches confidence metadata to every section result
     """
     logger.info(f"Starting thesis evaluation: {len(text)} chars (~{estimate_tokens(text)} tokens)")
 
-    # 1. Extract sections (uses chunking for large documents)
+    # 1. Detect document type FIRST — determines which sections to grade
+    print("  -> Detecting document type...")
+    doc_classification = detect_document_type(text)
+    doc_type    = doc_classification["document_type"]
+    skip_keys   = doc_classification.get("skip_sections", [])
+    adjusted_total = doc_classification.get("adjusted_total")
+    logger.info(f"Document type: {doc_type} (confidence={doc_classification['confidence']:.2f}), skip={skip_keys}")
+    print(f"  -> Document type: {doc_type.upper()} (confidence={doc_classification['confidence']:.0%})")
+
+    # 2. Extract sections
+    print("  -> Extracting sections...")
     sections = split_thesis_sections(text)
 
     if "error" in sections:
         return sections
 
-    # 2. Get section mapping (thesis_key -> rubric section name)
+    # 3. Get section mapping (thesis_key -> rubric section name)
     section_map = get_section_mapping(institution)
 
-    # 3. Evaluate each section independently with only its rubric
+    # 4. Evaluate each non-skipped section
     all_issues = []
+    section_confidences: Dict[str, float] = {}
+
     for thesis_key, rubric_section in section_map.items():
+        # Skip sections not applicable for this document type
+        if thesis_key in skip_keys:
+            print(f"  -> Skipping: {rubric_section} (proposal mode)")
+            continue
+
         section_text = sections.get(thesis_key, "")
         if section_text:
             print(f"  -> Evaluating: {rubric_section}...")
-            issues = _evaluate_section(rubric_section, section_text, institution)
+            issues = _evaluate_section(rubric_section, section_text, institution, feedback_style)
+
+            # Compute per-section confidence from text quality signals
+            confidence = _estimate_section_confidence(section_text, rubric_section)
+            section_confidences[rubric_section] = confidence
+
+            # Attach confidence to each issue for downstream UI
+            for issue in issues:
+                issue["confidence"] = confidence
+
             all_issues.extend(issues)
 
-    # 4. Cross-Section Validation (routed to GitHub GPT with token-safe context)
+    # 5. Cross-Section Validation
     from .validation_engine import run_cross_validation
     print("  -> Running Cross-Section Validation...")
     cross_validation_result = run_cross_validation(sections)
 
-    # 5. Deterministic Python Scoring
+    # 6. Deterministic Python Scoring
     scoring_result = calculate_score(all_issues, institution)
 
-    # Apply cross-validation deductions
+    # 7. Apply cross-validation deductions
     scoring_result["overall_score"] -= cross_validation_result["total_deductions"]
     scoring_result["cross_validation"] = cross_validation_result
 
-    # Attach sections for UI
-    scoring_result["sections"] = sections
-    scoring_result["institution"] = institution
+    # 8. If proposal, cap total_marks to adjusted total
+    if adjusted_total is not None:
+        scoring_result["total_marks"] = adjusted_total
+        # Re-clamp overall score
+        if scoring_result["overall_score"] > adjusted_total:
+            scoring_result["overall_score"] = adjusted_total
 
-    logger.info(f"Evaluation complete. Score: {scoring_result.get('overall_score', 'N/A')}")
+    # 9. Attach Phase 2 metadata
+    scoring_result["sections"]             = sections
+    scoring_result["institution"]          = institution
+    scoring_result["document_type"]        = doc_classification
+    scoring_result["feedback_style"]       = feedback_style
+    scoring_result["section_confidences"]  = section_confidences
+    scoring_result["skipped_sections"]     = skip_keys
+
+    logger.info(f"Evaluation complete. Score: {scoring_result.get('overall_score', 'N/A')}/{scoring_result.get('total_marks', 100)}")
     return scoring_result
+
+
+def _estimate_section_confidence(section_text: str, section_name: str) -> float:
+    """
+    Heuristically estimates how confident the AI evaluation of this section is.
+    Based on: text length, presence of section heading, content density.
+
+    Returns: float 0.0 – 1.0
+    """
+    if not section_text or len(section_text.strip()) < 50:
+        return 0.30  # Very short — low confidence
+
+    confidence = 0.50  # Base
+
+    # Length bonus (more text = more to evaluate)
+    word_count = len(section_text.split())
+    if word_count > 500:
+        confidence += 0.20
+    elif word_count > 200:
+        confidence += 0.10
+
+    # Heading presence
+    name_lower = section_name.lower()
+    text_lower = section_text.lower()
+    if any(kw in text_lower[:500] for kw in [name_lower, "chapter", "introduction", "methodology", "references", "abstract"]):
+        confidence += 0.10
+
+    # Content density — penalise if mostly whitespace or repetition
+    unique_words = len(set(section_text.lower().split()))
+    density = unique_words / max(word_count, 1)
+    if density > 0.35:
+        confidence += 0.10
+
+    return min(round(confidence, 2), 0.97)
