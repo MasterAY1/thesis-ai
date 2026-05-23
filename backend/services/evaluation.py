@@ -1,14 +1,24 @@
 """
-ThesisAI Evaluation Pipeline — Two-stage extraction with chunking.
-Phase 2: Integrates document classifier, feedback styles, confidence scoring,
-         proposal-aware section skipping.
+ThesisAI Evaluation Pipeline — Optimized Async Version.
+
+Optimizations applied:
+  1. PARALLEL SECTION EVALUATION: asyncio.gather() runs all sections concurrently.
+  2. FAST / DEEP MODES: Fast skips cross-validation; Deep runs full pipeline.
+  3. SKIP LOGIC: Missing/empty sections return instantly without AI calls.
+  4. CONTEXT TRIMMING: Max 12k chars per section via extract_relevant_context().
+  5. PERFORMANCE TIMING: Every stage is timed and returned in debug mode.
+  6. PER-SECTION PROGRESS: Emits live status updates to the job store.
+  7. PARTIAL RESULTS: One failed section does NOT crash the evaluation.
 """
+import asyncio
 import json
 import logging
-from typing import Dict, Any, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
+
 from .ai.router import get_router
 from .scoring import calculate_score
-from .chunking import chunk_text, merge_section_results, estimate_tokens, safe_truncate_for_github
+from .chunking import chunk_text, merge_section_results, estimate_tokens
 from .rubric_loader import (
     build_section_prompt,
     get_section_mapping,
@@ -16,102 +26,15 @@ from .rubric_loader import (
 )
 from .document_classifier import detect_document_type
 from .feedback_styles import get_style_tone_modifier
+from .context_extractor import extract_relevant_context, MAX_SECTION_CHARS
 
 logger = logging.getLogger("thesis_ai.evaluation")
 
+# ── Constants ──────────────────────────────────────────────────────────────────
 
-def split_thesis_sections(text: str) -> Dict[str, str]:
-    """
-    Two-stage section extraction using document chunking.
+EVALUATION_MODES = {"fast", "deep"}
 
-    Stage 1: Split document into manageable chunks.
-    Stage 2: Gemini processes each chunk to identify which sections it contains.
-    Stage 3: Merge chunk results into complete sections.
-
-    This prevents sending the entire thesis in a single API call.
-    """
-    logger.info(f"Starting section extraction: {len(text)} chars (~{estimate_tokens(text)} tokens)")
-
-    # Stage 1: Chunk the document
-    chunks = chunk_text(text, chunk_size=12000, overlap=1000)
-    logger.info(f"Document split into {len(chunks)} chunks")
-
-    if len(chunks) <= 1:
-        # Small document — process in one shot (Gemini handles this fine)
-        return _extract_sections_single(text)
-
-    # Stage 2: Process each chunk with Gemini
-    chunk_sections = {}
-    for i, chunk in enumerate(chunks):
-        logger.info(f"Processing chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
-        result = _extract_sections_single(chunk)
-
-        # Merge this chunk's results into the accumulated sections
-        for key in ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]:
-            existing = chunk_sections.get(key, "")
-            new_content = result.get(key, "")
-            if new_content and new_content.strip():
-                # Append new content, avoiding duplication
-                if new_content.strip() not in existing:
-                    chunk_sections[key] = (existing + "\n\n" + new_content).strip()
-
-    # Ensure all required keys exist
-    required_keys = ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]
-    for key in required_keys:
-        if key not in chunk_sections or not chunk_sections[key]:
-            chunk_sections[key] = ""
-
-    total_extracted = sum(len(v) for v in chunk_sections.values())
-    logger.info(f"Section extraction complete: {total_extracted} chars across {sum(1 for v in chunk_sections.values() if v)} sections")
-
-    return chunk_sections
-
-
-def _extract_sections_single(text: str) -> Dict[str, str]:
-    """
-    Extract sections from a single chunk of text using Gemini.
-    This is the core extraction call — used for both single-shot and chunked extraction.
-    """
-    system_prompt = """
-    You are an academic document parser. Your task is to take the raw text of a university thesis or final year project and split it into its core sections.
-
-    Rules:
-    1. The document formatting may be messy. Look for logical transitions (e.g., "CHAPTER ONE", "INTRODUCTION", "REFERENCES").
-    2. Extract the full text for each section.
-    3. Do not summarize or alter the text. Just extract it.
-    4. If a section is completely missing from the text, return an empty string "" for that field. Do not hallucinate content.
-    5. Return ONLY a valid JSON object matching this exact schema:
-
-    {
-      "abstract": "...",
-      "chapter1": "...",
-      "chapter2": "...",
-      "chapter3": "...",
-      "chapter4": "...",
-      "chapter5": "...",
-      "references": "..."
-    }
-    """
-
-    user_prompt = f"Raw Thesis Text:\n{text}"
-
-    router = get_router()
-    result = router.generate(system_prompt, user_prompt, task="extract_sections")
-
-    # Strip router metadata before returning to caller
-    result.pop("_meta", None)
-
-    required_keys = ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]
-    for key in required_keys:
-        if key not in result or result[key] is None:
-            result[key] = ""
-
-    return result
-
-
-# ------------------------------------------------------------------
-# Shared system prompt template (section-specific rubric injected)
-# ------------------------------------------------------------------
+# ── System prompt template ─────────────────────────────────────────────────────
 
 SYSTEM_PROMPT_TEMPLATE = """
 You are a calm, experienced, and professional university supervisor grading an NMCN (Nursing and Midwifery Council of Nigeria) research project.
@@ -166,25 +89,192 @@ Provide your output STRICTLY as a JSON object matching this schema:
 """
 
 
-def _evaluate_section(
+# ── Missing section helper ─────────────────────────────────────────────────────
+
+def _missing_chapter_result(section_name: str, max_marks: int) -> List[Dict]:
+    """
+    Return a canned deduction for a completely missing section.
+    No AI call needed — immediate, deterministic result.
+    """
+    return [
+        {
+            "issue_title": f"{section_name} — Section Completely Missing",
+            "severity": "high",
+            "rubric": {
+                "section": section_name,
+                "max_marks": max_marks,
+                "expected_requirement": f"Complete {section_name} section — {max_marks} marks",
+            },
+            "evidence": {
+                "quote": "",
+                "location": section_name,
+            },
+            "deduction_reasoning": (
+                f"The {section_name} section was not found in the uploaded document. "
+                "All marks for this section are forfeited."
+            ),
+            "supervisor_note": (
+                f"The {section_name} section is required by the NMCN rubric and must be present. "
+                "Please ensure this section is included in your final submission."
+            ),
+            "suggested_fix": f"Add a complete {section_name} section following the NMCN guidelines.",
+            "recoverable_marks": max_marks,
+            "_missing_section": True,
+        }
+    ]
+
+
+# ── Section extraction ─────────────────────────────────────────────────────────
+
+def split_thesis_sections(text: str) -> Dict[str, str]:
+    """
+    Two-stage section extraction using document chunking.
+
+    Stage 1: Split document into manageable chunks.
+    Stage 2: Gemini processes each chunk to identify which sections it contains.
+    Stage 3: Merge chunk results into complete sections.
+    """
+    logger.info(f"Starting section extraction: {len(text)} chars (~{estimate_tokens(text)} tokens)")
+
+    chunks = chunk_text(text, chunk_size=12000, overlap=1000)
+    logger.info(f"Document split into {len(chunks)} chunks")
+
+    if len(chunks) <= 1:
+        return _extract_sections_single(text)
+
+    chunk_sections: Dict[str, str] = {}
+    for i, chunk in enumerate(chunks):
+        logger.info(f"Processing chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
+        result = _extract_sections_single(chunk)
+
+        for key in ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]:
+            existing = chunk_sections.get(key, "")
+            new_content = result.get(key, "")
+            if new_content and new_content.strip():
+                if new_content.strip() not in existing:
+                    chunk_sections[key] = (existing + "\n\n" + new_content).strip()
+
+    required_keys = ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]
+    for key in required_keys:
+        if key not in chunk_sections or not chunk_sections[key]:
+            chunk_sections[key] = ""
+
+    total_extracted = sum(len(v) for v in chunk_sections.values())
+    logger.info(
+        f"Section extraction complete: {total_extracted} chars across "
+        f"{sum(1 for v in chunk_sections.values() if v)} sections"
+    )
+    return chunk_sections
+
+
+def _extract_sections_single(text: str) -> Dict[str, str]:
+    """
+    Extract sections from a single chunk of text using Gemini.
+    Core extraction call — used for both single-shot and chunked extraction.
+    """
+    system_prompt = """
+    You are an academic document parser. Your task is to take the raw text of a university thesis or final year project and split it into its core sections.
+
+    Rules:
+    1. The document formatting may be messy. Look for logical transitions (e.g., "CHAPTER ONE", "INTRODUCTION", "REFERENCES").
+    2. Extract the full text for each section.
+    3. Do not summarize or alter the text. Just extract it.
+    4. If a section is completely missing from the text, return an empty string "" for that field. Do not hallucinate content.
+    5. Return ONLY a valid JSON object matching this exact schema:
+
+    {
+      "abstract": "...",
+      "chapter1": "...",
+      "chapter2": "...",
+      "chapter3": "...",
+      "chapter4": "...",
+      "chapter5": "...",
+      "references": "..."
+    }
+    """
+
+    user_prompt = f"Raw Thesis Text:\n{text}"
+
+    router = get_router()
+    result = router.generate(system_prompt, user_prompt, task="extract_sections")
+
+    result.pop("_meta", None)
+
+    required_keys = ["abstract", "chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "references"]
+    for key in required_keys:
+        if key not in result or result[key] is None:
+            result[key] = ""
+
+    return result
+
+
+# ── Section confidence estimator ──────────────────────────────────────────────
+
+def _estimate_section_confidence(section_text: str, section_name: str) -> float:
+    """
+    Heuristically estimates how confident the AI evaluation of this section is.
+    Based on: text length, presence of section heading, content density.
+    Returns: float 0.0 – 1.0
+    """
+    if not section_text or len(section_text.strip()) < 50:
+        return 0.30
+
+    confidence = 0.50
+
+    word_count = len(section_text.split())
+    if word_count > 500:
+        confidence += 0.20
+    elif word_count > 200:
+        confidence += 0.10
+
+    name_lower = section_name.lower()
+    text_lower = section_text.lower()
+    if any(kw in text_lower[:500] for kw in [name_lower, "chapter", "introduction", "methodology", "references", "abstract"]):
+        confidence += 0.10
+
+    unique_words = len(set(section_text.lower().split()))
+    density = unique_words / max(word_count, 1)
+    if density > 0.35:
+        confidence += 0.10
+
+    return min(round(confidence, 2), 0.97)
+
+
+# ── Core async section evaluator ──────────────────────────────────────────────
+
+async def _evaluate_section_async(
     section_name: str,
     section_text: str,
+    max_marks: int,
     institution: str = "nmcn",
     feedback_style: str = "friendly_lecturer",
+    evaluation_mode: str = "fast",
+    progress_callback: Optional[Callable] = None,
 ) -> List[Dict]:
     """
-    Evaluates a SINGLE thesis section against only its relevant rubric criteria.
+    Evaluates a SINGLE thesis section asynchronously.
 
-    For large sections, uses chunking to split the section and merge results.
-    Routed to Gemini (standard rubric evaluation task).
+    - Uses extract_relevant_context() to trim context to MAX_SECTION_CHARS.
+    - Offloads blocking AI call to a thread pool via asyncio.to_thread().
+    - Emits progress via progress_callback if provided.
+
+    Returns: list of issue dicts.
     """
-    if not section_text or section_text.strip() == "" or section_text.strip() == "Not provided.":
-        return []
+    t_start = time.monotonic()
 
+    # ── Skip logic: no AI call for missing/empty sections ──────────────────────
+    if not section_text or section_text.strip() in ("", "Not provided."):
+        logger.info(f"[SKIP] {section_name}: empty section → missing deduction (no AI call)")
+        if progress_callback:
+            progress_callback(section_name, "missing")
+        return _missing_chapter_result(section_name, max_marks)
+
+    if progress_callback:
+        progress_callback(section_name, "evaluating")
+
+    # ── Context trimming ───────────────────────────────────────────────────────
     rubric_criteria = build_section_prompt(section_name, institution)
-    rubric_data = load_rubric(institution)
-    section_data = rubric_data["sections"].get(section_name, {})
-    max_marks = section_data.get("total", 0)
+    trimmed_text = extract_relevant_context(section_text, rubric_criteria)
 
     tone_modifier = get_style_tone_modifier(feedback_style)
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -193,171 +283,318 @@ def _evaluate_section(
         max_marks=max_marks,
     ) + f"\n\nTONE INSTRUCTION: {tone_modifier}"
 
-    # Truncate section text to a safe limit for the provider
-    max_chars = 15000 if "Chapter" in section_name else 5000
-    truncated_text = section_text[:max_chars]
+    # ── Chunking for very large sections (after trimming) ─────────────────────
+    section_chunks = chunk_text(trimmed_text, chunk_size=6000, overlap=500)
 
-    # If text is still very large, chunk it and merge results
-    section_chunks = chunk_text(truncated_text, chunk_size=6000, overlap=500)
+    try:
+        if len(section_chunks) <= 1:
+            user_prompt = f"Evaluate this section of the NMCN research project:\n\n{section_name}:\n{trimmed_text}"
+            router = get_router()
 
-    if len(section_chunks) <= 1:
-        # Single chunk — standard evaluation
-        user_prompt = f"Evaluate this section of the NMCN research project:\n\n{section_name}:\n{truncated_text}"
+            # Offload blocking AI call to thread pool
+            ai_result = await asyncio.to_thread(
+                router.generate, system_prompt, user_prompt,
+                "section_evaluation", evaluation_mode
+            )
 
-        router = get_router()
-        ai_result = router.generate(system_prompt, user_prompt, task="section_evaluation")
+            if "error" in ai_result:
+                logger.warning(f"AI evaluation failed for {section_name}: {ai_result['error']}")
+                if progress_callback:
+                    progress_callback(section_name, "error")
+                return []
 
-        if "error" in ai_result:
-            logger.warning(f"AI evaluation failed for {section_name}: {ai_result['error']}")
-            return []
+            meta = ai_result.pop("_meta", {})
+            provider = meta.get("provider", "unknown")
+            latency = meta.get("latency_s", "?")
+            duration = round(time.monotonic() - t_start, 2)
+            logger.info(f"[{provider}] {section_name} evaluated in {latency}s (total={duration}s)")
 
-        meta = ai_result.pop("_meta", {})
-        provider = meta.get("provider", "unknown")
-        latency = meta.get("latency_s", "?")
-        logger.info(f"[{provider}] {section_name} evaluated in {latency}s")
-        print(f"    [{provider}] {section_name} evaluated in {latency}s")
+            if progress_callback:
+                progress_callback(section_name, "completed")
 
-        return ai_result.get("issues", [])
-    else:
-        # Multiple chunks — evaluate each and merge
-        logger.info(f"{section_name}: {len(section_chunks)} chunks for evaluation")
-        chunk_results = []
-        router = get_router()
+            return ai_result.get("issues", [])
 
-        for i, chunk in enumerate(section_chunks):
-            user_prompt = f"Evaluate this section of the NMCN research project (part {i + 1}/{len(section_chunks)}):\n\n{section_name}:\n{chunk}"
-            ai_result = router.generate(system_prompt, user_prompt, task="section_evaluation")
+        else:
+            # Multiple chunks — evaluate each in parallel and merge
+            logger.info(f"{section_name}: {len(section_chunks)} chunks → parallel evaluation")
+            router = get_router()
 
-            if "error" not in ai_result:
-                meta = ai_result.pop("_meta", {})
-                provider = meta.get("provider", "unknown")
-                latency = meta.get("latency_s", "?")
-                logger.info(f"[{provider}] {section_name} chunk {i + 1} in {latency}s")
-                chunk_results.append(ai_result)
+            async def eval_chunk(i: int, chunk: str) -> Dict:
+                up = f"Evaluate this section of the NMCN research project (part {i + 1}/{len(section_chunks)}):\n\n{section_name}:\n{chunk}"
+                return await asyncio.to_thread(
+                    router.generate, system_prompt, up,
+                    "section_evaluation", evaluation_mode
+                )
 
-        merged = merge_section_results(chunk_results)
-        print(f"    [chunked] {section_name}: {len(merged.get('issues', []))} issues from {len(section_chunks)} chunks")
-        return merged.get("issues", [])
+            chunk_results = await asyncio.gather(
+                *[eval_chunk(i, c) for i, c in enumerate(section_chunks)],
+                return_exceptions=True,
+            )
 
+            valid_results = [
+                r for r in chunk_results
+                if not isinstance(r, Exception) and "error" not in r
+            ]
+            for r in valid_results:
+                r.pop("_meta", None)
+
+            merged = merge_section_results(valid_results)
+            duration = round(time.monotonic() - t_start, 2)
+            logger.info(
+                f"[chunked] {section_name}: {len(merged.get('issues', []))} issues "
+                f"from {len(section_chunks)} chunks in {duration}s"
+            )
+
+            if progress_callback:
+                progress_callback(section_name, "completed")
+
+            return merged.get("issues", [])
+
+    except Exception as exc:
+        logger.error(f"Unhandled error evaluating {section_name}: {exc}", exc_info=True)
+        if progress_callback:
+            progress_callback(section_name, "error")
+        return []
+
+
+# ── Main async evaluation entry point ─────────────────────────────────────────
+
+async def evaluate_thesis_async(
+    text: str,
+    institution: str = "nmcn",
+    feedback_style: str = "friendly_lecturer",
+    evaluation_mode: str = "fast",
+    progress_store: Optional[Dict] = None,
+    debug: bool = False,
+) -> Dict[str, Any]:
+    """
+    Optimized async evaluation pipeline.
+
+    Modes:
+        fast — Gemini Flash only, parallel sections, no cross-validation.
+               Target: 30–90 seconds.
+        deep — Full pipeline: parallel sections + parallel cross-validation.
+               Target: 2–4 minutes.
+
+    Args:
+        text:            Extracted thesis text.
+        institution:     Rubric institution code (default: "nmcn").
+        feedback_style:  Tone modifier key.
+        evaluation_mode: "fast" | "deep".
+        progress_store:  Dict ref from job store for live updates.
+        debug:           If True, include per-stage timings in response.
+
+    Returns:
+        Full evaluation result dict (same shape as before for backward compat).
+    """
+    if evaluation_mode not in EVALUATION_MODES:
+        logger.warning(f"Unknown evaluation_mode '{evaluation_mode}', defaulting to 'fast'")
+        evaluation_mode = "fast"
+
+    timings: Dict[str, float] = {}
+    pipeline_start = time.monotonic()
+
+    logger.info(
+        f"[{evaluation_mode.upper()}] Starting evaluation: "
+        f"{len(text)} chars (~{estimate_tokens(text)} tokens)"
+    )
+
+    # ── Helper: update the job progress store ─────────────────────────────────
+    def _update_progress(section_name: str, status: str) -> None:
+        if progress_store is not None:
+            if "section_progress" not in progress_store:
+                progress_store["section_progress"] = {}
+            progress_store["section_progress"][section_name] = status
+
+            # Update the coarse-grained progress message too
+            completed = sum(
+                1 for s in progress_store["section_progress"].values()
+                if s in ("completed", "missing", "skipped")
+            )
+            total = len(progress_store["section_progress"])
+            progress_store["progress"] = (
+                f"Evaluating sections… {completed}/{total} complete"
+            )
+
+    # ── 1. Detect document type ───────────────────────────────────────────────
+    t0 = time.monotonic()
+    if progress_store is not None:
+        progress_store["progress"] = "Detecting document type…"
+
+    doc_classification = await asyncio.to_thread(detect_document_type, text)
+    doc_type   = doc_classification["document_type"]
+    skip_keys  = doc_classification.get("skip_sections", [])
+    adjusted_total = doc_classification.get("adjusted_total")
+    timings["classification_s"] = round(time.monotonic() - t0, 2)
+    logger.info(
+        f"Document type: {doc_type} (confidence={doc_classification['confidence']:.2f}), "
+        f"skip={skip_keys}, took {timings['classification_s']}s"
+    )
+
+    # ── 2. Extract sections ───────────────────────────────────────────────────
+    t0 = time.monotonic()
+    if progress_store is not None:
+        progress_store["progress"] = "Extracting sections…"
+
+    sections = await asyncio.to_thread(split_thesis_sections, text)
+    timings["extraction_s"] = round(time.monotonic() - t0, 2)
+
+    if "error" in sections:
+        return sections
+
+    # Emit early signals: which sections were detected
+    detected = [k for k, v in sections.items() if v and v.strip()]
+    if progress_store is not None:
+        progress_store["progress"] = f"Sections detected: {', '.join(detected)}"
+        progress_store["detected_sections"] = detected
+    logger.info(f"Sections extracted in {timings['extraction_s']}s: {detected}")
+
+    # ── 3. Build section task list ────────────────────────────────────────────
+    section_map = get_section_mapping(institution)
+    rubric_data = load_rubric(institution)
+
+    # Pre-populate section_progress with all expected sections
+    if progress_store is not None:
+        progress_store["section_progress"] = {
+            rubric_name: ("skipped" if thesis_key in skip_keys else "pending")
+            for thesis_key, rubric_name in section_map.items()
+        }
+
+    # Build coroutines for each non-skipped section
+    section_tasks = []
+    section_order = []
+
+    for thesis_key, rubric_section in section_map.items():
+        if thesis_key in skip_keys:
+            logger.info(f"Skipping: {rubric_section} (proposal mode)")
+            continue
+
+        max_marks = rubric_data["sections"].get(rubric_section, {}).get("total", 0)
+        section_text = sections.get(thesis_key, "")
+
+        coro = _evaluate_section_async(
+            section_name=rubric_section,
+            section_text=section_text,
+            max_marks=max_marks,
+            institution=institution,
+            feedback_style=feedback_style,
+            evaluation_mode=evaluation_mode,
+            progress_callback=_update_progress,
+        )
+        section_tasks.append(coro)
+        section_order.append(rubric_section)
+
+    # ── 4. Run ALL section evaluations in parallel ────────────────────────────
+    t0 = time.monotonic()
+    if progress_store is not None:
+        progress_store["progress"] = f"Running {len(section_tasks)} section evaluations in parallel…"
+
+    logger.info(f"Launching {len(section_tasks)} section evaluations in parallel…")
+
+    section_results = await asyncio.gather(*section_tasks, return_exceptions=True)
+
+    timings["section_evaluation_s"] = round(time.monotonic() - t0, 2)
+    logger.info(f"All section evaluations completed in {timings['section_evaluation_s']}s")
+
+    # ── 5. Merge all issues & build confidences ───────────────────────────────
+    all_issues: List[Dict] = []
+    section_confidences: Dict[str, float] = {}
+
+    for i, result in enumerate(section_results):
+        rubric_section = section_order[i]
+        thesis_key = [k for k, v in section_map.items() if v == rubric_section][0]
+        section_text = sections.get(thesis_key, "")
+
+        if isinstance(result, Exception):
+            logger.error(f"Section '{rubric_section}' raised exception: {result}")
+            continue
+
+        issues: List[Dict] = result or []
+
+        confidence = _estimate_section_confidence(section_text, rubric_section)
+        section_confidences[rubric_section] = confidence
+
+        for issue in issues:
+            issue["confidence"] = confidence
+
+        all_issues.extend(issues)
+
+    # ── 6. Cross-Section Validation (DEEP MODE ONLY) ─────────────────────────
+    cross_validation_result: Dict[str, Any] = {
+        "validations": [],
+        "total_deductions": 0,
+        "summary": "Cross-section validation skipped (Fast Mode). Switch to Deep Mode for full consistency checks.",
+    }
+
+    if evaluation_mode == "deep":
+        from .validation_engine import run_cross_validation_async
+        t0 = time.monotonic()
+        if progress_store is not None:
+            progress_store["progress"] = "Running cross-section validation…"
+
+        cross_validation_result = await run_cross_validation_async(sections)
+        timings["cross_validation_s"] = round(time.monotonic() - t0, 2)
+        logger.info(f"Cross-validation completed in {timings['cross_validation_s']}s")
+
+    # ── 7. Deterministic Python scoring ──────────────────────────────────────
+    t0 = time.monotonic()
+    scoring_result = calculate_score(all_issues, institution)
+    scoring_result["overall_score"] -= cross_validation_result["total_deductions"]
+    scoring_result["cross_validation"] = cross_validation_result
+    timings["scoring_s"] = round(time.monotonic() - t0, 3)
+
+    if adjusted_total is not None:
+        scoring_result["total_marks"] = adjusted_total
+        if scoring_result["overall_score"] > adjusted_total:
+            scoring_result["overall_score"] = adjusted_total
+
+    # ── 8. Attach metadata ────────────────────────────────────────────────────
+    timings["total_s"] = round(time.monotonic() - pipeline_start, 2)
+
+    scoring_result["sections"]            = sections
+    scoring_result["institution"]         = institution
+    scoring_result["document_type"]       = doc_classification
+    scoring_result["feedback_style"]      = feedback_style
+    scoring_result["section_confidences"] = section_confidences
+    scoring_result["skipped_sections"]    = skip_keys
+    scoring_result["evaluation_mode"]     = evaluation_mode
+
+    if debug:
+        scoring_result["_timings"] = timings
+
+    if progress_store is not None:
+        progress_store["progress"] = "Evaluation complete."
+
+    logger.info(
+        f"[{evaluation_mode.upper()}] Evaluation complete in {timings['total_s']}s. "
+        f"Score: {scoring_result.get('overall_score', 'N/A')}/{scoring_result.get('total_marks', 100)}"
+    )
+    return scoring_result
+
+
+# ── Sync wrapper (backward compatibility) ─────────────────────────────────────
 
 def evaluate_thesis(
     text: str,
     institution: str = "nmcn",
     feedback_style: str = "friendly_lecturer",
+    evaluation_mode: str = "fast",
+    progress_store: Optional[Dict] = None,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """
-    Phase 2 evaluation pipeline:
-      - Detects document type (proposal / thesis / seminar / dissertation)
-      - Skips non-applicable sections for proposals
-      - Applies feedback style tone to all AI calls
-      - Attaches confidence metadata to every section result
+    Synchronous wrapper around evaluate_thesis_async().
+
+    Maintains full backward compatibility with existing callers.
+    Runs the async pipeline in a new event loop.
     """
-    logger.info(f"Starting thesis evaluation: {len(text)} chars (~{estimate_tokens(text)} tokens)")
-
-    # 1. Detect document type FIRST — determines which sections to grade
-    print("  -> Detecting document type...")
-    doc_classification = detect_document_type(text)
-    doc_type    = doc_classification["document_type"]
-    skip_keys   = doc_classification.get("skip_sections", [])
-    adjusted_total = doc_classification.get("adjusted_total")
-    logger.info(f"Document type: {doc_type} (confidence={doc_classification['confidence']:.2f}), skip={skip_keys}")
-    print(f"  -> Document type: {doc_type.upper()} (confidence={doc_classification['confidence']:.0%})")
-
-    # 2. Extract sections
-    print("  -> Extracting sections...")
-    sections = split_thesis_sections(text)
-
-    if "error" in sections:
-        return sections
-
-    # 3. Get section mapping (thesis_key -> rubric section name)
-    section_map = get_section_mapping(institution)
-
-    # 4. Evaluate each non-skipped section
-    all_issues = []
-    section_confidences: Dict[str, float] = {}
-
-    for thesis_key, rubric_section in section_map.items():
-        # Skip sections not applicable for this document type
-        if thesis_key in skip_keys:
-            print(f"  -> Skipping: {rubric_section} (proposal mode)")
-            continue
-
-        section_text = sections.get(thesis_key, "")
-        if section_text:
-            print(f"  -> Evaluating: {rubric_section}...")
-            issues = _evaluate_section(rubric_section, section_text, institution, feedback_style)
-
-            # Compute per-section confidence from text quality signals
-            confidence = _estimate_section_confidence(section_text, rubric_section)
-            section_confidences[rubric_section] = confidence
-
-            # Attach confidence to each issue for downstream UI
-            for issue in issues:
-                issue["confidence"] = confidence
-
-            all_issues.extend(issues)
-
-    # 5. Cross-Section Validation
-    from .validation_engine import run_cross_validation
-    print("  -> Running Cross-Section Validation...")
-    cross_validation_result = run_cross_validation(sections)
-
-    # 6. Deterministic Python Scoring
-    scoring_result = calculate_score(all_issues, institution)
-
-    # 7. Apply cross-validation deductions
-    scoring_result["overall_score"] -= cross_validation_result["total_deductions"]
-    scoring_result["cross_validation"] = cross_validation_result
-
-    # 8. If proposal, cap total_marks to adjusted total
-    if adjusted_total is not None:
-        scoring_result["total_marks"] = adjusted_total
-        # Re-clamp overall score
-        if scoring_result["overall_score"] > adjusted_total:
-            scoring_result["overall_score"] = adjusted_total
-
-    # 9. Attach Phase 2 metadata
-    scoring_result["sections"]             = sections
-    scoring_result["institution"]          = institution
-    scoring_result["document_type"]        = doc_classification
-    scoring_result["feedback_style"]       = feedback_style
-    scoring_result["section_confidences"]  = section_confidences
-    scoring_result["skipped_sections"]     = skip_keys
-
-    logger.info(f"Evaluation complete. Score: {scoring_result.get('overall_score', 'N/A')}/{scoring_result.get('total_marks', 100)}")
-    return scoring_result
-
-
-def _estimate_section_confidence(section_text: str, section_name: str) -> float:
-    """
-    Heuristically estimates how confident the AI evaluation of this section is.
-    Based on: text length, presence of section heading, content density.
-
-    Returns: float 0.0 – 1.0
-    """
-    if not section_text or len(section_text.strip()) < 50:
-        return 0.30  # Very short — low confidence
-
-    confidence = 0.50  # Base
-
-    # Length bonus (more text = more to evaluate)
-    word_count = len(section_text.split())
-    if word_count > 500:
-        confidence += 0.20
-    elif word_count > 200:
-        confidence += 0.10
-
-    # Heading presence
-    name_lower = section_name.lower()
-    text_lower = section_text.lower()
-    if any(kw in text_lower[:500] for kw in [name_lower, "chapter", "introduction", "methodology", "references", "abstract"]):
-        confidence += 0.10
-
-    # Content density — penalise if mostly whitespace or repetition
-    unique_words = len(set(section_text.lower().split()))
-    density = unique_words / max(word_count, 1)
-    if density > 0.35:
-        confidence += 0.10
-
-    return min(round(confidence, 2), 0.97)
+    return asyncio.run(
+        evaluate_thesis_async(
+            text=text,
+            institution=institution,
+            feedback_style=feedback_style,
+            evaluation_mode=evaluation_mode,
+            progress_store=progress_store,
+            debug=debug,
+        )
+    )

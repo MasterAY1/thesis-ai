@@ -16,7 +16,7 @@ logger = logging.getLogger("thesis_ai.providers.gemini")
 GEMINI_MODELS = [
     "models/gemini-2.5-flash",       # Primary: best quality
     "models/gemini-2.0-flash",       # Fallback 1: stable
-    "models/gemini-3.1-flash-lite",  # Fallback 2: fast/cheap
+    "models/gemini-1.5-flash",       # Fallback 2: fast/cheap (corrected name)
 ]
 
 
@@ -48,7 +48,6 @@ class GeminiProvider(BaseProvider):
             return self._active_model
         env_model = os.getenv("MODEL_NAME", "")
         if env_model:
-            # Ensure the models/ prefix is present
             if not env_model.startswith("models/"):
                 env_model = f"models/{env_model}"
             return env_model
@@ -63,6 +62,7 @@ class GeminiProvider(BaseProvider):
         """
         Generate a JSON response using Gemini.
         Tries the primary model first, then falls back through GEMINI_MODELS.
+        Thread-safe — can be called from asyncio.to_thread().
         """
         if not self.api_key:
             return {"error": "GEMINI_API_KEY is not set. Please configure it in your environment."}
@@ -76,7 +76,6 @@ class GeminiProvider(BaseProvider):
             system_instruction=system_prompt,
         )
 
-        # Build the model attempt list
         primary = self._resolve_model(model_override)
         models_to_try = [primary]
         for m in GEMINI_MODELS:
@@ -102,7 +101,6 @@ class GeminiProvider(BaseProvider):
                     content = self._clean_json_response(content)
                     parsed = json.loads(content)
 
-                    # Cache which model actually worked
                     self._active_model = model_name
                     return parsed
 
@@ -116,3 +114,16 @@ class GeminiProvider(BaseProvider):
             logger.info(f"Gemini model {model_name} exhausted, trying next fallback...")
 
         return {"error": f"Gemini provider failed. Last error: {last_error}"}
+
+    async def generate_async(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model_override: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Async wrapper around generate().
+        Offloads the blocking HTTP call to a thread pool so the event loop isn't blocked.
+        """
+        import asyncio
+        return await asyncio.to_thread(self.generate, system_prompt, user_prompt, model_override)

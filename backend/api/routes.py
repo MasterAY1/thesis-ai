@@ -1,18 +1,24 @@
 """
-ThesisAI API Routes — Phase 2
+ThesisAI API Routes — Optimized v3
 
-New endpoints (Phase 2):
-  POST /api/rewrite          — AI "Fix This For Me" rewrite for a single deduction
-  GET  /api/report/{job_id}  — Download PDF evaluation report
-  GET  /api/rubrics          — List all available institutions/rubrics
-  GET  /api/styles           — List all available feedback styles
+Optimizations applied:
+  - POST /api/evaluate now accepts evaluation_mode ("fast"|"deep").
+  - Document hash caching: same file + mode → instant cached result.
+  - Richer job store: per-section section_progress dict.
+  - GET /api/progress/{job_id}: lightweight 2s polling endpoint (no results payload).
+  - Deferred PDF generation: report is generated on demand, not blocking evaluation.
+  - Performance timings returned when ?debug=true.
 
-Existing endpoints (preserved):
+Existing endpoints preserved (backward compatible):
   GET  /api/ping
-  POST /api/evaluate         — Async job queue (returns job_id)
-  GET  /api/status/{job_id}  — Poll for job result
+  POST /api/evaluate   — returns job_id immediately
+  GET  /api/status/{job_id}
+  POST /api/rewrite
+  POST /api/report
+  GET  /api/rubrics
+  GET  /api/styles
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import os
@@ -22,12 +28,15 @@ import traceback
 import threading
 import logging
 import io
+from typing import Optional
+
 from services.extraction import extract_text
 from services.evaluation import evaluate_thesis
 from services.rewrite_engine import rewrite_issue
 from services.report_generator import generate_pdf_report
 from services.feedback_styles import list_styles
 from services.rubric_loader import list_available_rubrics
+from services.cache import get_cache
 
 logger = logging.getLogger("thesis_ai.routes")
 
@@ -40,7 +49,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 jobs = {}
 
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
+# ── Schemas ────────────────────────────────────────────────────────────────────
 
 class RewriteRequest(BaseModel):
     issue_title: str
@@ -50,14 +59,14 @@ class RewriteRequest(BaseModel):
     feedback_style: str = "friendly_lecturer"
 
 
-# ── Health / ping ─────────────────────────────────────────────────────────────
+# ── Health / ping ──────────────────────────────────────────────────────────────
 
 @router.get("/ping")
 def ping_server():
     return {"message": "pong"}
 
 
-# ── Meta endpoints ────────────────────────────────────────────────────────────
+# ── Meta endpoints ─────────────────────────────────────────────────────────────
 
 @router.get("/styles")
 def get_feedback_styles():
@@ -71,18 +80,39 @@ def get_available_rubrics():
     return {"institutions": list_available_rubrics()}
 
 
-# ── Async Evaluation ──────────────────────────────────────────────────────────
+@router.get("/cache/stats")
+def cache_stats():
+    """Return evaluation cache statistics (for monitoring)."""
+    return get_cache().stats()
+
+
+# ── Async Evaluation ───────────────────────────────────────────────────────────
 
 @router.post("/evaluate")
 async def evaluate_document(
     file: UploadFile = File(...),
     institution: str = "nmcn",
     feedback_style: str = "friendly_lecturer",
+    evaluation_mode: str = "fast",   # NEW: "fast" | "deep"
+    debug: bool = False,
 ):
     """
     Accept a thesis file and start evaluation in the background.
-    Returns a job_id immediately. Poll /api/status/{job_id} for results.
+    Returns a job_id immediately. Poll /api/progress/{job_id} or
+    /api/status/{job_id} for results.
+
+    evaluation_mode:
+        "fast"  — Gemini Flash only, parallel sections, no cross-validation.
+                  Target: 30–90 seconds.
+        "deep"  — Full pipeline with cross-section validation.
+                  Target: 2–4 minutes.
     """
+    if evaluation_mode not in ("fast", "deep"):
+        raise HTTPException(
+            status_code=400,
+            detail="evaluation_mode must be 'fast' or 'deep'."
+        )
+
     if not (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith('.docx')):
         raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
 
@@ -94,8 +124,33 @@ async def evaluate_document(
     file_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
 
     try:
+        # Read file bytes for hash check
+        file_bytes = await file.read()
+
+        # ── Document hash cache check ──────────────────────────────────────────
+        cache = get_cache()
+        cache_key = cache.make_key(file_bytes, evaluation_mode, institution)
+        cached_result = cache.get(cache_key)
+
+        if cached_result is not None:
+            logger.info(f"Cache HIT for job {job_id}: returning cached result instantly")
+            return {
+                "status":    "completed",
+                "job_id":    job_id,
+                "cached":    True,
+                "message":   "Returned from cache. Same document already evaluated.",
+                "results": {
+                    "status":           "success",
+                    "filename":         file.filename,
+                    "extracted_length": cached_result.get("_extracted_length", 0),
+                    "results":          cached_result,
+                    "cached":           True,
+                },
+            }
+
+        # ── Save file and extract text ─────────────────────────────────────────
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(file_bytes)
 
         extracted_text = extract_text(file_path)
 
@@ -108,14 +163,19 @@ async def evaluate_document(
             "status":           "processing",
             "filename":         file.filename,
             "extracted_length": len(extracted_text),
-            "progress":         "Starting AI evaluation...",
+            "progress":         "Starting evaluation…",
+            "section_progress": {},
+            "detected_sections": [],
+            "evaluation_mode":  evaluation_mode,
             "results":          None,
             "error":            None,
+            "_cache_key":       cache_key,
+            "_extracted_length": len(extracted_text),
         }
 
         thread = threading.Thread(
             target=_run_evaluation,
-            args=(job_id, extracted_text, file_path, institution, feedback_style),
+            args=(job_id, extracted_text, file_path, institution, feedback_style, evaluation_mode, debug),
             daemon=True,
         )
         thread.start()
@@ -123,7 +183,8 @@ async def evaluate_document(
         return {
             "status":  "accepted",
             "job_id":  job_id,
-            "message": "Evaluation started. Poll /api/status/{job_id} for results.",
+            "message": f"Evaluation started ({evaluation_mode} mode). Poll /api/progress/{{job_id}} for live updates.",
+            "evaluation_mode": evaluation_mode,
         }
 
     except HTTPException:
@@ -141,13 +202,39 @@ def _run_evaluation(
     file_path: str,
     institution: str = "nmcn",
     feedback_style: str = "friendly_lecturer",
+    evaluation_mode: str = "fast",
+    debug: bool = False,
 ):
-    """Background worker — runs the full evaluation pipeline."""
+    """
+    Background worker — runs the full async evaluation pipeline in a thread.
+    Uses asyncio.run() to create a fresh event loop for the async pipeline.
+    """
     try:
-        logger.info(f"Job {job_id}: Starting evaluation (style={feedback_style}, institution={institution})")
-        jobs[job_id]["progress"] = "Detecting document type..."
+        import asyncio
+        logger.info(
+            f"Job {job_id}: Starting {evaluation_mode} evaluation "
+            f"(style={feedback_style}, institution={institution})"
+        )
 
-        result = evaluate_thesis(text, institution=institution, feedback_style=feedback_style)
+        # Pass the job dict as progress_store so the pipeline can update it live
+        progress_store = jobs[job_id]
+
+        result = evaluate_thesis(
+            text=text,
+            institution=institution,
+            feedback_style=feedback_style,
+            evaluation_mode=evaluation_mode,
+            progress_store=progress_store,
+            debug=debug,
+        )
+
+        # Tag with extracted length for cache
+        result["_extracted_length"] = jobs[job_id]["_extracted_length"]
+
+        # Store in cache so next identical upload is instant
+        cache_key = jobs[job_id].get("_cache_key")
+        if cache_key:
+            get_cache().set(cache_key, result)
 
         jobs[job_id]["status"]   = "completed"
         jobs[job_id]["progress"] = "Evaluation complete."
@@ -165,18 +252,49 @@ def _run_evaluation(
             os.remove(file_path)
 
 
+# ── Progress polling (lightweight, 2s interval) ────────────────────────────────
+
+@router.get("/progress/{job_id}")
+def get_job_progress(job_id: str):
+    """
+    Lightweight progress endpoint — poll every 2 seconds for live section updates.
+    Returns section_progress dict WITHOUT the full results payload.
+    Frontend uses this during evaluation to show section-by-section progress.
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    job = jobs[job_id]
+
+    return {
+        "job_id":           job_id,
+        "status":           job["status"],
+        "progress":         job["progress"],
+        "evaluation_mode":  job.get("evaluation_mode", "fast"),
+        "section_progress": job.get("section_progress", {}),
+        "detected_sections": job.get("detected_sections", []),
+    }
+
+
+# ── Status polling (full results on completion) ────────────────────────────────
+
 @router.get("/status/{job_id}")
 def get_job_status(job_id: str):
-    """Poll this endpoint every 5s to check evaluation progress."""
+    """
+    Poll this endpoint to check evaluation progress and receive final results.
+    For live section progress during evaluation, use /api/progress/{job_id} instead.
+    """
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found.")
 
     job = jobs[job_id]
     response = {
-        "job_id":   job_id,
-        "status":   job["status"],
-        "progress": job["progress"],
-        "filename": job["filename"],
+        "job_id":           job_id,
+        "status":           job["status"],
+        "progress":         job["progress"],
+        "filename":         job["filename"],
+        "evaluation_mode":  job.get("evaluation_mode", "fast"),
+        "section_progress": job.get("section_progress", {}),
     }
 
     if job["status"] == "completed":
@@ -195,18 +313,14 @@ def get_job_status(job_id: str):
     return response
 
 
-# ── Rewrite Engine ────────────────────────────────────────────────────────────
+# ── Rewrite Engine ─────────────────────────────────────────────────────────────
 
 @router.post("/rewrite")
 async def rewrite_section(payload: RewriteRequest):
     """
     AI 'Fix This For Me' — generates an academic rewrite for a specific deduction.
-
-    Body:
-        issue_title, issue_description, section_name, context, feedback_style
-
-    Response:
-        { "rewrite": "...", "tips": ["..."] }
+    Body: issue_title, issue_description, section_name, context, feedback_style
+    Response: { "rewrite": "...", "tips": ["..."] }
     """
     if not payload.issue_title or not payload.section_name:
         raise HTTPException(status_code=400, detail="issue_title and section_name are required.")
@@ -225,12 +339,13 @@ async def rewrite_section(payload: RewriteRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── PDF Report ────────────────────────────────────────────────────────────────
+# ── PDF Report (deferred, on-demand) ──────────────────────────────────────────
 
 @router.post("/report")
 async def download_report(evaluation_data: dict):
     """
-    Generate and stream a PDF evaluation report.
+    Generate and stream a PDF evaluation report on demand.
+    PDF generation is NOT done during evaluation — only when this endpoint is called.
 
     Body: The full evaluation result JSON (same structure stored in localStorage).
     Response: PDF file download.
