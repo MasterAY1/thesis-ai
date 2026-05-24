@@ -126,7 +126,8 @@ class GitHubProvider(BaseProvider):
                             {"role": "user", "content": user_prompt},
                         ],
                         response_format={"type": "json_object"},
-                        temperature=0.3,
+                        temperature=0,       # DETERMINISTIC: no randomness
+                        top_p=0.1,           # DETERMINISTIC: minimal sampling
                     )
 
                     content = response.choices[0].message.content

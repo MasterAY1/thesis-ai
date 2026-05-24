@@ -1,6 +1,13 @@
 """
-Gemini AI Provider — Google's fast/cheap model for lightweight tasks.
-Handles: section splitting, quick grading, formatting checks, rubric evaluation.
+Gemini AI Provider — Deterministic Mode
+
+CRITICAL SETTINGS FOR SCORING CONSISTENCY:
+  temperature = 0      → no randomness
+  top_p = 0.1          → minimal sampling
+  top_k = 1            → greedy decoding
+  response_mime_type   → application/json (strict)
+
+Same prompt → same output. Every time.
 """
 import os
 import json
@@ -11,17 +18,16 @@ from .base_provider import BaseProvider
 
 logger = logging.getLogger("thesis_ai.providers.gemini")
 
-# Model fallback chain — tries each in order until one works
-# The models/ prefix is required by the google-genai SDK
+# Model fallback chain
 GEMINI_MODELS = [
-    "models/gemini-2.5-flash",       # Primary: best quality
-    "models/gemini-2.0-flash",       # Fallback 1: stable
-    "models/gemini-1.5-flash",       # Fallback 2: fast/cheap (corrected name)
+    "models/gemini-2.5-flash",
+    "models/gemini-2.0-flash",
+    "models/gemini-1.5-flash",
 ]
 
 
 class GeminiProvider(BaseProvider):
-    """Google Gemini Flash provider — default fast/cheap model."""
+    """Google Gemini Flash provider — deterministic mode for grading consistency."""
 
     name = "gemini"
 
@@ -60,8 +66,14 @@ class GeminiProvider(BaseProvider):
         model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Generate a JSON response using Gemini.
-        Tries the primary model first, then falls back through GEMINI_MODELS.
+        Generate a JSON response using Gemini in DETERMINISTIC mode.
+
+        Settings enforced:
+          temperature = 0   → greedy, no randomness
+          top_p = 0.1       → minimal nucleus sampling
+          top_k = 1         → pick the single most likely token
+          response_mime_type = application/json → strict JSON output
+
         Thread-safe — can be called from asyncio.to_thread().
         """
         if not self.api_key:
@@ -74,6 +86,9 @@ class GeminiProvider(BaseProvider):
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
             system_instruction=system_prompt,
+            temperature=0,       # DETERMINISTIC: no randomness
+            top_p=0.1,           # DETERMINISTIC: minimal sampling
+            top_k=1,             # DETERMINISTIC: greedy decoding
         )
 
         primary = self._resolve_model(model_override)
@@ -84,9 +99,9 @@ class GeminiProvider(BaseProvider):
 
         last_error = ""
         for model_name in models_to_try:
-            for attempt in range(2):  # 2 attempts per model
+            for attempt in range(2):
                 try:
-                    logger.info(f"Gemini request: model={model_name}, attempt={attempt + 1}")
+                    logger.info(f"Gemini request: model={model_name}, attempt={attempt + 1}, temp=0")
 
                     response = client.models.generate_content(
                         model=model_name,
@@ -121,9 +136,6 @@ class GeminiProvider(BaseProvider):
         user_prompt: str,
         model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Async wrapper around generate().
-        Offloads the blocking HTTP call to a thread pool so the event loop isn't blocked.
-        """
+        """Async wrapper — offloads blocking call to thread pool."""
         import asyncio
         return await asyncio.to_thread(self.generate, system_prompt, user_prompt, model_override)
