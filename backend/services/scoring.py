@@ -68,8 +68,12 @@ def calculate_score(issues: List[Dict[str, Any]], institution: str = "nmcn") -> 
                     "marks_recovered": actual_deduction
                 })
 
-    overall_score = total_max - total_deductions
-    projected_score = overall_score + sum(imp["marks_recovered"] for imp in improvements)
+    overall_score = round(total_max - total_deductions, 1)
+    projected_score = round(overall_score + sum(imp["marks_recovered"] for imp in improvements), 1)
+    
+    # Round section scores to eliminate floating point artifacts
+    for section_key in breakdown:
+        breakdown[section_key]["score"] = round(breakdown[section_key]["score"], 1)
     
     feedback = [f"{d['section']}: {d['issue_title']} (-{d['deduction']} marks)" for d in formatted_deductions]
     if not feedback:
