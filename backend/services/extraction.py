@@ -5,12 +5,15 @@ import os
 
 def clean_text(text: str) -> str:
     """
-    Cleans extracted text by removing excessive line breaks and normalizing spacing.
+    Cleans extracted text by normalizing spacing while PRESERVING paragraph breaks.
+    Keeps double-newlines between paragraphs so heading detection works properly.
     """
-    # Replace multiple newlines with a single newline
-    text = re.sub(r'\n{2,}', '\n', text)
-    # Replace multiple spaces with a single space
-    text = re.sub(r' {2,}', ' ', text)
+    # Normalize line endings
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # Collapse 3+ newlines into 2 (preserve paragraph breaks)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Replace multiple spaces with a single space (per line)
+    text = re.sub(r'[^\S\n]+', ' ', text)
     # Strip leading and trailing whitespace
     return text.strip()
 
