@@ -41,7 +41,7 @@ export default function LandingPage() {
         <div className="relative max-w-4xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-blue-500/10 border border-blue-500/20 rounded-full text-xs text-blue-300 mb-8">
             <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-            Powered by AI &middot; Built for NMCN Standards
+            Powered by AI &middot; Supports Nigerian Universities & Professional Standards
           </div>
           <h1 className="text-5xl md:text-7xl font-bold leading-tight tracking-tight mb-6">
             Grade Your Project<br/>
@@ -178,19 +178,22 @@ export default function LandingPage() {
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-16">
             <p className="text-purple-400 text-sm font-semibold tracking-widest uppercase mb-3">Rubric Engine</p>
-            <h2 className="text-3xl md:text-5xl font-bold">Graded Against The Official<br/><span className="text-purple-400">NMCN Rubric</span></h2>
+            <h2 className="text-3xl md:text-5xl font-bold">Graded Against Official &amp; Adaptive<br/><span className="text-purple-400">Nigerian School Rubrics</span></h2>
+            <p className="text-blue-200/50 mt-3 max-w-xl mx-auto text-sm leading-relaxed">
+              Grade against NMCN, Lagos State University (LASU), University of Lagos (UNILAG), OAU, FUTA, standard Nigerian 5-chapter structures, or upload your department guidelines directly.
+            </p>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { name: "Preliminary Pages", marks: 8, color: "blue" },
+              { name: "Preliminary Pages", marks: 10, color: "blue" },
               { name: "Chapter One", marks: 15, color: "indigo" },
-              { name: "Chapter Two", marks: 12, color: "purple" },
+              { name: "Chapter Two", marks: 15, color: "purple" },
               { name: "Chapter Three", marks: 20, color: "pink" },
               { name: "Chapter Four", marks: 15, color: "red" },
-              { name: "Chapter Five", marks: 20, color: "orange" },
+              { name: "Chapter Five", marks: 15, color: "orange" },
               { name: "References & Appendix", marks: 7, color: "yellow" },
-              { name: "Typing Instructions", marks: 3, color: "green" },
+              { name: "General Formatting", marks: 3, color: "green" },
             ].map((item) => (
               <div key={item.name} className="bg-white/[0.03] border border-white/5 rounded-xl p-5 text-center hover:bg-white/[0.06] transition-all">
                 <p className="text-2xl md:text-3xl font-bold mb-1">{item.marks}</p>
@@ -221,9 +224,9 @@ export default function LandingPage() {
                 <tr className="hover:bg-white/[0.02] transition-colors">
                   <td className="p-6 font-medium text-white flex items-center gap-3">
                     <span className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">🏛️</span>
-                    NMCN-Aligned
+                    School-Aware
                   </td>
-                  <td className="p-6 text-blue-200/70">Institutional trust — graded exactly how your school grades.</td>
+                  <td className="p-6 text-blue-200/70">Institutional trust — supports official rubrics, Nigerian fallsbacks, or dynamic department guidelines.</td>
                 </tr>
                 <tr className="hover:bg-white/[0.02] transition-colors">
                   <td className="p-6 font-medium text-white flex items-center gap-3">
@@ -287,7 +290,7 @@ export default function LandingPage() {
             © 2026 <span className="text-blue-400">Thesis</span>AI. All rights reserved.
           </span>
           <div className="flex gap-6 text-xs text-blue-200/30">
-            <span>Built for NMCN Standards</span>
+            <span>Supports Nigerian Universities &amp; Colleges</span>
             <span>·</span>
             <span>AI-Powered Evaluation</span>
           </div>
