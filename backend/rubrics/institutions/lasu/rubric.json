@@ -1,0 +1,6 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "Lagos State University",
+  "institution_code": "lasu",
+  "overrides": {}
+}

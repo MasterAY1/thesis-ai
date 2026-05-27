@@ -1,0 +1,112 @@
+{
+  "institution_name": "General Nigerian University",
+  "institution_code": "nigeria_general",
+  "total_marks": 100,
+  "sections": {
+    "Preliminary Pages": {
+      "total": 10,
+      "thesis_key": "abstract",
+      "criteria": {
+        "Title Page (project title, name, matric number, department, faculty, date)": 1,
+        "Declaration/Certification Page": 0.5,
+        "Approval Page (supervisor, HOD signatures)": 0.5,
+        "Dedication": 0.5,
+        "Acknowledgements": 0.5,
+        "Abstract (200-300 words, problem, method, results, conclusion)": 2,
+        "Keywords (4-6 relevant terms)": 0.5,
+        "Table of Contents (accurate page numbers)": 1,
+        "List of Tables": 0.5,
+        "List of Figures": 0.5,
+        "List of Abbreviations (if applicable)": 0.5,
+        "Table of Contents formatting and accuracy": 1,
+        "Overall completeness of preliminary pages": 1.5
+      }
+    },
+    "Chapter One": {
+      "total": 15,
+      "thesis_key": "chapter1",
+      "criteria": {
+        "Background to the Study (clear introduction to topic area)": 3,
+        "Statement of the Problem (clear articulation of gap/issue)": 2.5,
+        "Objectives of the Study (general and specific)": 2,
+        "Research Questions or Hypotheses": 2,
+        "Significance of the Study (academic and practical contributions)": 2,
+        "Scope and Delimitation of the Study": 1.5,
+        "Definition/Operational Definition of Terms": 2
+      }
+    },
+    "Chapter Two": {
+      "total": 15,
+      "thesis_key": "chapter2",
+      "criteria": {
+        "Conceptual Review (key concepts related to topic)": 3,
+        "Theoretical Framework (relevant theory linked to study)": 2.5,
+        "Empirical Review (previous studies, findings, gaps)": 4,
+        "Summary of Literature Review": 1.5,
+        "In-text citation quality and consistency": 2,
+        "Currency of references (journals within 5-10 years)": 2
+      }
+    },
+    "Chapter Three": {
+      "total": 20,
+      "thesis_key": "chapter3",
+      "criteria": {
+        "Research Design (appropriate design chosen and justified)": 2,
+        "Study Area/Setting (geographical and institutional context)": 1.5,
+        "Target Population": 1.5,
+        "Sample Size and Sampling Technique": 2.5,
+        "Instruments for Data Collection (questionnaire, interview, etc.)": 2,
+        "Validity of Instrument": 1.5,
+        "Reliability of Instrument (Cronbach alpha or equivalent)": 2,
+        "Method of Data Collection (procedure, duration)": 2,
+        "Method of Data Analysis (statistical tools, software)": 2.5,
+        "Ethical Considerations (informed consent, IRB approval)": 2.5
+      }
+    },
+    "Chapter Four": {
+      "total": 15,
+      "thesis_key": "chapter4",
+      "criteria": {
+        "Data Presentation (tables, figures, charts)": 4,
+        "Proper labelling and formatting of tables/figures": 2.5,
+        "Description and interpretation of results": 4,
+        "Answering research questions or testing hypotheses": 4.5
+      }
+    },
+    "Chapter Five": {
+      "total": 15,
+      "thesis_key": "chapter5",
+      "criteria": {
+        "Summary of Findings": 2.5,
+        "Discussion of Findings (with literature support)": 3.5,
+        "Implications of Findings": 2,
+        "Limitations of the Study": 1.5,
+        "Conclusion": 2,
+        "Recommendations": 2,
+        "Suggestions for Further Studies": 1.5
+      }
+    },
+    "References and Appendices": {
+      "total": 7,
+      "thesis_key": "references",
+      "criteria": {
+        "Proper use of APA format (7th Edition)": 3,
+        "Alphabetical arrangement of references": 1,
+        "Completeness and accuracy of references": 1,
+        "Appendices content (questionnaire, consent form, etc.)": 2
+      }
+    },
+    "General Formatting": {
+      "total": 3,
+      "thesis_key": null,
+      "criteria": {
+        "Font and size (Times New Roman, 12pt)": 0.5,
+        "Line spacing (1.5 or double)": 0.5,
+        "Margins (1 inch or 1.5 inch left)": 0.5,
+        "Pagination (consistent, correct placement)": 0.5,
+        "Paragraphing and alignment": 0.5,
+        "Overall document quality and presentation": 0.5
+      }
+    }
+  }
+}

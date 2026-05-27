@@ -29,13 +29,21 @@ import threading
 import logging
 import io
 from typing import Optional
+import json
 
 from services.extraction import extract_text
 from services.evaluation import evaluate_thesis
 from services.rewrite_engine import rewrite_issue
 from services.report_generator import generate_pdf_report
 from services.feedback_styles import list_styles
-from services.rubric_loader import list_available_rubrics
+from services.rubric_loader import (
+    list_available_rubrics,
+    list_all_institutions,
+    get_rubric_metadata,
+    load_rubric_with_override,
+)
+from services.rubric_extractor import extract_rubric_from_file, extract_rubric_from_text
+from services.rubric_validator import validate_rubric
 from services.cache import get_cache
 
 logger = logging.getLogger("thesis_ai.routes")
@@ -57,6 +65,7 @@ class RewriteRequest(BaseModel):
     section_name: str
     context: str = ""
     feedback_style: str = "friendly_lecturer"
+    institution_name: Optional[str] = "NMCN"
 
 
 # ── Health / ping ──────────────────────────────────────────────────────────────
@@ -80,6 +89,95 @@ def get_available_rubrics():
     return {"institutions": list_available_rubrics()}
 
 
+@router.get("/institutions")
+def get_institutions():
+    """
+    Returns enriched institution list for the frontend dropdown.
+    Each entry: {code, name, type}.
+    type: 'official' (NMCN), 'general' (nigeria_general), 'institutional' (LASU, etc.)
+    """
+    return {"institutions": list_all_institutions()}
+
+
+@router.post("/rubric/extract")
+async def extract_rubric_from_upload(
+    file: UploadFile = File(...),
+    institution_name: str = "Uploaded Guideline",
+):
+    """
+    Upload a department handbook / scoring guide (PDF/DOCX).
+    Returns extracted rubric structure + confidence scores for user review.
+    """
+    if not (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith('.docx')):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
+
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+    if file.size and file.size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB.")
+
+    file_path = os.path.join(UPLOAD_DIR, f"rubric_{uuid.uuid4().hex[:8]}_{file.filename}")
+    try:
+        file_bytes = await file.read()
+        with open(file_path, "wb") as buffer:
+            buffer.write(file_bytes)
+
+        result = extract_rubric_from_file(file_path, institution_name)
+
+        if result["rubric"] is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not extract rubric from file. " + "; ".join(result["warnings"])
+            )
+
+        # Validate the extracted rubric
+        is_valid, validation_errors = validate_rubric(result["rubric"])
+        if not is_valid:
+            result["warnings"].append(
+                "Extracted rubric has structural issues. Some sections may use default values."
+            )
+            result["validation_errors"] = [e.to_dict() for e in validation_errors]
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+@router.post("/rubric/preview")
+async def preview_rubric(
+    institution: str = "nmcn",
+    custom_rubric: Optional[str] = None,
+):
+    """
+    Returns rubric structure for the preview modal.
+    Accepts either an institution code or a custom rubric JSON.
+    """
+    if custom_rubric:
+        try:
+            rubric_dict = json.loads(custom_rubric)
+            is_valid, errors = validate_rubric(rubric_dict)
+            metadata = get_rubric_metadata(rubric=rubric_dict)
+            metadata["is_valid"] = is_valid
+            metadata["validation_errors"] = [e.to_dict() for e in errors]
+            return metadata
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON in custom_rubric")
+
+    try:
+        metadata = get_rubric_metadata(institution)
+        metadata["is_valid"] = True
+        metadata["validation_errors"] = []
+        return metadata
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Rubric not found: {institution}")
+
+
 @router.get("/cache/stats")
 def cache_stats():
     """Return evaluation cache statistics (for monitoring)."""
@@ -93,7 +191,8 @@ async def evaluate_document(
     file: UploadFile = File(...),
     institution: str = "nmcn",
     feedback_style: str = "friendly_lecturer",
-    evaluation_mode: str = "fast",   # NEW: "fast" | "deep"
+    evaluation_mode: str = "fast",
+    custom_rubric: Optional[str] = None,  # JSON string of adaptive rubric
     debug: bool = False,
 ):
     """
@@ -173,9 +272,21 @@ async def evaluate_document(
             "_extracted_length": len(extracted_text),
         }
 
+        # Parse custom rubric if provided
+        parsed_custom_rubric = None
+        if custom_rubric:
+            try:
+                parsed_custom_rubric = json.loads(custom_rubric)
+                is_valid, _ = validate_rubric(parsed_custom_rubric)
+                if not is_valid:
+                    logger.warning(f"Job {job_id}: Custom rubric invalid, falling back to {institution}")
+                    parsed_custom_rubric = None
+            except json.JSONDecodeError:
+                logger.warning(f"Job {job_id}: Custom rubric JSON parse failed, falling back to {institution}")
+
         thread = threading.Thread(
             target=_run_evaluation,
-            args=(job_id, extracted_text, file_path, institution, feedback_style, evaluation_mode, debug),
+            args=(job_id, extracted_text, file_path, institution, feedback_style, evaluation_mode, debug, parsed_custom_rubric),
             daemon=True,
         )
         thread.start()
@@ -204,6 +315,7 @@ def _run_evaluation(
     feedback_style: str = "friendly_lecturer",
     evaluation_mode: str = "fast",
     debug: bool = False,
+    custom_rubric: dict = None,
 ):
     """
     Background worker — runs the full async evaluation pipeline in a thread.
@@ -226,6 +338,7 @@ def _run_evaluation(
             evaluation_mode=evaluation_mode,
             progress_store=progress_store,
             debug=debug,
+            custom_rubric=custom_rubric,
         )
 
         # Tag with extracted length for cache
@@ -332,6 +445,7 @@ async def rewrite_section(payload: RewriteRequest):
             section_name=payload.section_name,
             context=payload.context,
             feedback_style=payload.feedback_style,
+            institution_name=payload.institution_name,
         )
         return result
     except Exception as e:

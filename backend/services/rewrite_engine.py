@@ -25,6 +25,7 @@ def rewrite_issue(
     section_name: str,
     context: str = "",
     feedback_style: str = "friendly_lecturer",
+    institution_name: str = "NMCN",
 ) -> Dict[str, Any]:
     """
     Generates an AI rewrite for a specific grading deduction.
@@ -36,6 +37,7 @@ def rewrite_issue(
         context:           A short excerpt from the student's original text (optional)
         feedback_style:    One of: strict_supervisor, friendly_lecturer, blunt_examiner,
                            student_helper, quick_summary
+        institution_name:  The name of the institution/council (e.g., Lagos State University, NMCN)
 
     Returns:
         {
@@ -47,7 +49,7 @@ def rewrite_issue(
     truncated_context = context[:MAX_CONTEXT_CHARS] if context else "Not provided."
 
     system_prompt = f"""
-You are a specialist academic writing assistant helping a Nigerian nursing student improve their NMCN research project.
+You are a specialist academic writing assistant helping a Nigerian student improve their {institution_name} research project.
 
 {style_instruction}
 
@@ -56,7 +58,7 @@ Produce a corrected academic rewrite for ONE specific issue identified in their 
 
 STRICT RULES:
 1. Write ONLY the corrected passage — no preamble, no meta-commentary.
-2. Maintain formal academic style appropriate for an NMCN project.
+2. Maintain formal academic style appropriate for a {institution_name} project.
 3. The rewrite must be directly usable — paste-ready into the thesis.
 4. Maximum 200 words for the rewrite.
 5. Also provide 2-3 short improvement tips as bullet points.

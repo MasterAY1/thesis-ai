@@ -24,11 +24,12 @@ function ConfidenceBadge({ confidence }: { confidence?: number }) {
 
 // ── Rewrite Modal ──────────────────────────────────────────────────────────
 function RewriteModal({
-  issue, onClose, feedbackStyle,
+  issue, onClose, feedbackStyle, institutionName,
 }: {
   issue: any;
   onClose: () => void;
   feedbackStyle: string;
+  institutionName: string;
 }) {
   const [rewrite, setRewrite]   = useState<string>('');
   const [tips, setTips]         = useState<string[]>([]);
@@ -47,6 +48,7 @@ function RewriteModal({
             section_name: issue.rubric?.section || issue.section || '',
             context: issue.evidence?.quote || '',
             feedback_style: feedbackStyle,
+            institution_name: institutionName,
           }),
           signal: AbortSignal.timeout(60000),
         });
@@ -129,11 +131,12 @@ function RewriteModal({
 
 // ── Deduction card ─────────────────────────────────────────────────────────
 function DeductionCard({
-  item, index, feedbackStyle,
+  item, index, feedbackStyle, institutionName,
 }: {
   item: any;
   index: number;
   feedbackStyle: string;
+  institutionName: string;
 }) {
   const [showRewrite, setShowRewrite] = useState(false);
   const lowConfidence = item.confidence !== undefined && item.confidence < 0.60;
@@ -141,7 +144,7 @@ function DeductionCard({
   return (
     <>
       {showRewrite && (
-        <RewriteModal issue={item} onClose={() => setShowRewrite(false)} feedbackStyle={feedbackStyle} />
+        <RewriteModal issue={item} onClose={() => setShowRewrite(false)} feedbackStyle={feedbackStyle} institutionName={institutionName} />
       )}
       <details className="group bg-white/5 border border-white/10 rounded-xl open:bg-white/8 open:ring-1 open:ring-blue-500/40 transition-all">
         <summary className="flex items-center justify-between p-4 cursor-pointer">
@@ -319,7 +322,10 @@ export default function Results() {
               <div>
                 <h1 className="text-3xl font-bold">Evaluation Results</h1>
                 <p className="text-white/50 text-sm mt-1">
-                  {results.filename} · {r?.institution?.toUpperCase() || 'NMCN'} Rubric
+                  {results.filename} &middot; {r?.institution_name || r?.institution?.toUpperCase() || 'NMCN'} Rubric
+                  {r?.rubric_source === 'adaptive' && (
+                    <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">Custom</span>
+                  )}
                 </p>
                 {/* Document type badge */}
                 {docType && (
@@ -400,7 +406,7 @@ export default function Results() {
               <div className="space-y-3">
                 {r?.deductions?.length > 0 ? (
                   r.deductions.map((item: any, index: number) => (
-                    <DeductionCard key={index} item={item} index={index} feedbackStyle={feedbackStyle} />
+                    <DeductionCard key={index} item={item} index={index} feedbackStyle={feedbackStyle} institutionName={r?.institution_name || r?.institution?.toUpperCase() || 'NMCN'} />
                   ))
                 ) : (
                   <p className="text-white/50 text-sm">No major deductions found. Excellent work!</p>

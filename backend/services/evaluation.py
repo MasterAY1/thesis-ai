@@ -24,6 +24,8 @@ from .rubric_loader import (
     build_section_prompt,
     get_section_mapping,
     load_rubric,
+    load_rubric_with_override,
+    get_institution_name,
 )
 from .document_classifier import detect_document_type
 from .feedback_styles import get_style_tone_modifier
@@ -54,7 +56,7 @@ MIN_SECTION_FOR_AI = {
 # No academic jargon. No robotic tone. Max 2-4 sentences per deduction.
 
 SYSTEM_PROMPT_TEMPLATE = """
-You are a helpful thesis reviewer checking a student's NMCN research project.
+You are a helpful thesis reviewer checking a student's {institution_name} research project.
 Your job is to find problems in this section and explain them simply.
 
 {rubric_criteria}
@@ -114,19 +116,19 @@ Output STRICTLY as JSON:
 
 # ── Missing section result ─────────────────────────────────────────────────────
 
-def _missing_chapter_result(section_name: str, max_marks: int) -> List[Dict]:
+def _missing_chapter_result(section_name: str, max_marks: int, institution_name: str = "institution") -> List[Dict]:
     """
     Return a canned deduction for a completely missing section.
     No AI call. Deterministic. Immediate.
     """
     return [
         {
-            "issue_title": f"{section_name} — Not Found in Document",
+            "issue_title": f"{section_name} -- Not Found in Document",
             "severity": "high",
             "rubric": {
                 "section": section_name,
                 "max_marks": max_marks,
-                "expected_requirement": f"Complete {section_name} section — {max_marks} marks",
+                "expected_requirement": f"Complete {section_name} section -- {max_marks} marks",
             },
             "evidence": {
                 "quote": "",
@@ -139,7 +141,7 @@ def _missing_chapter_result(section_name: str, max_marks: int) -> List[Dict]:
             "supervisor_note": (
                 f"Make sure your {section_name} section is included in your final submission."
             ),
-            "suggested_fix": f"Add a complete {section_name} section following the NMCN guidelines.",
+            "suggested_fix": f"Add a complete {section_name} section following the {institution_name} guidelines.",
             "recoverable_marks": max_marks,
             "_missing_section": True,
             "_source": "missing_gate",
@@ -158,6 +160,8 @@ async def _evaluate_section_async(
     feedback_style: str = "friendly_lecturer",
     evaluation_mode: str = "fast",
     progress_callback: Optional[Callable] = None,
+    institution_name: str = "institution",
+    rubric: Optional[Dict] = None,
 ) -> List[Dict]:
     """
     Evaluates a SINGLE thesis section asynchronously.
@@ -180,13 +184,13 @@ async def _evaluate_section_async(
         )
         if progress_callback:
             progress_callback(section_name, "missing")
-        return _missing_chapter_result(section_name, max_marks)
+        return _missing_chapter_result(section_name, max_marks, institution_name)
 
     if progress_callback:
         progress_callback(section_name, "evaluating")
 
-    # ── Context trimming ───────────────────────────────────────────────────────
-    rubric_criteria = build_section_prompt(section_name, institution)
+    # ── Context trimming ───────────────────────────────────────────────────
+    rubric_criteria = build_section_prompt(section_name, institution, rubric=rubric)
     trimmed_text = extract_relevant_context(section_text, rubric_criteria)
 
     tone_modifier = get_style_tone_modifier(feedback_style)
@@ -194,6 +198,7 @@ async def _evaluate_section_async(
         rubric_criteria=rubric_criteria,
         section_name=section_name,
         max_marks=max_marks,
+        institution_name=institution_name,
     ) + f"\n\nTONE: {tone_modifier}"
 
     # ── Chunking for very large sections ──────────────────────────────────────
@@ -382,6 +387,7 @@ async def evaluate_thesis_async(
     evaluation_mode: str = "fast",
     progress_store: Optional[Dict] = None,
     debug: bool = False,
+    custom_rubric: Optional[Dict] = None,
 ) -> Dict[str, Any]:
     """
     Deterministic evaluation pipeline.
@@ -461,8 +467,10 @@ async def evaluate_thesis_async(
     logger.info(f"Rule engine: {len(rule_issues)} deterministic issues in {timings['rule_engine_s']}s")
 
     # ── 4. Build section task list for AI evaluation ──────────────────────────
-    section_map = get_section_mapping(institution)
-    rubric_data = load_rubric(institution)
+    rubric_data = load_rubric_with_override(institution, custom_rubric)
+    section_map = get_section_mapping(institution, rubric=rubric_data)
+    inst_name = rubric_data.get("institution_name", get_institution_name(institution))
+    rubric_source = rubric_data.get("institution_code", institution)
 
     # Pre-populate section_progress
     if progress_store is not None:
@@ -491,6 +499,8 @@ async def evaluate_thesis_async(
             feedback_style=feedback_style,
             evaluation_mode=evaluation_mode,
             progress_callback=_update_progress,
+            institution_name=inst_name,
+            rubric=rubric_data,
         )
         section_tasks.append(coro)
         section_order.append(rubric_section)
@@ -578,6 +588,8 @@ async def evaluate_thesis_async(
 
     scoring_result["sections"]               = sections
     scoring_result["institution"]            = institution
+    scoring_result["institution_name"]       = inst_name
+    scoring_result["rubric_source"]          = rubric_source
     scoring_result["document_type"]          = doc_classification
     scoring_result["feedback_style"]         = feedback_style
     scoring_result["extraction_confidences"] = extraction_confidences
@@ -609,6 +621,7 @@ def evaluate_thesis(
     evaluation_mode: str = "fast",
     progress_store: Optional[Dict] = None,
     debug: bool = False,
+    custom_rubric: Optional[Dict] = None,
 ) -> Dict[str, Any]:
     """
     Synchronous wrapper around evaluate_thesis_async().
@@ -622,5 +635,6 @@ def evaluate_thesis(
             evaluation_mode=evaluation_mode,
             progress_store=progress_store,
             debug=debug,
+            custom_rubric=custom_rubric,
         )
     )

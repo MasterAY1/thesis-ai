@@ -1,0 +1,6 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "Obafemi Awolowo University",
+  "institution_code": "oau",
+  "overrides": {}
+}

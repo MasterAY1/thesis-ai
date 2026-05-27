@@ -15,7 +15,12 @@ const FEEDBACK_STYLES = [
 ];
 
 const INSTITUTIONS = [
-  { code: 'nmcn', label: 'NMCN — Nursing & Midwifery Council of Nigeria' },
+  { code: 'nmcn',            label: 'NMCN -- Nursing & Midwifery Council',       type: 'official' },
+  { code: 'nigeria_general', label: 'General Nigerian University',                type: 'general' },
+  { code: 'lasu',            label: 'LASU -- Lagos State University',             type: 'institutional' },
+  { code: 'unilag',          label: 'UNILAG -- University of Lagos',              type: 'institutional' },
+  { code: 'oau',             label: 'OAU -- Obafemi Awolowo University',          type: 'institutional' },
+  { code: 'futa',            label: 'FUTA -- Federal Uni. of Technology, Akure',  type: 'institutional' },
 ];
 
 const EVALUATION_MODES = [
@@ -43,15 +48,19 @@ const EVALUATION_MODES = [
   },
 ];
 
-// Ordered list of sections that will appear in the progress tracker
-const SECTION_ORDER = [
+// Default section order — overridden dynamically when rubric is loaded
+const DEFAULT_SECTION_ORDER = [
   'Preliminary Pages',
   'Chapter One',
   'Chapter Two',
   'Chapter Three',
   'Chapter Four',
   'Chapter Five',
+  'References and Appendix',
+  'References and Appendices',
   'References',
+  'Typing Instructions',
+  'General Formatting',
 ];
 
 type SectionStatus = 'pending' | 'evaluating' | 'completed' | 'missing' | 'skipped' | 'error';
@@ -146,6 +155,14 @@ export default function Evaluate() {
   const [elapsedSeconds, setElapsedSeconds]   = useState(0);
   const [earlySignals, setEarlySignals]       = useState<string[]>([]);
 
+  // Guideline upload state
+  const [guidelineFile, setGuidelineFile]     = useState<File | null>(null);
+  const [customRubric, setCustomRubric]       = useState<any>(null);
+  const [showRubricPreview, setShowRubricPreview] = useState(false);
+  const [rubricExtracting, setRubricExtracting] = useState(false);
+  const [rubricWarnings, setRubricWarnings]   = useState<string[]>([]);
+  const [rubricConfidence, setRubricConfidence] = useState<number>(0);
+
   const router      = useRouter();
   const startTimeRef = useRef<number>(0);
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -219,9 +236,13 @@ export default function Evaluate() {
       setProgressMessage('Uploading document…');
       setEarlySignals(prev => [...prev, '✓ Connecting to server']);
 
-      // Submit evaluation job
+      // Submit evaluation job — include custom_rubric if set
+      let evalUrl = `${API_URL}/api/evaluate?institution=${institution}&feedback_style=${feedbackStyle}&evaluation_mode=${evalMode}`;
+      if (customRubric) {
+        formData.append('custom_rubric', JSON.stringify(customRubric));
+      }
       const uploadResponse = await fetch(
-        `${API_URL}/api/evaluate?institution=${institution}&feedback_style=${feedbackStyle}&evaluation_mode=${evalMode}`,
+        evalUrl,
         { method: 'POST', body: formData, signal: AbortSignal.timeout(60000) }
       );
 
@@ -383,24 +404,26 @@ export default function Evaluate() {
             <div className="px-4 py-3 border-b border-white/5">
               <p className="text-xs font-semibold text-white/50 uppercase tracking-widest">Section Progress</p>
             </div>
-            <div className="divide-y divide-white/5">
-              {SECTION_ORDER.map(section => {
-                const status = sectionProgress[section] ?? 'pending';
-                return (
-                  <div key={section} className="flex items-center gap-3 px-4 py-3">
-                    <StatusIcon status={status} />
-                    <span className={`text-sm flex-1 font-medium ${
-                      status === 'pending' ? 'text-white/30' : 'text-white/80'
-                    }`}>
-                      {section}
-                    </span>
-                    <span className={`text-xs font-mono ${statusColor(status)}`}>
-                      {statusLabel(status)}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
+            {/* Use sections from API progress or fall back to default order */}
+            {(Object.keys(sectionProgress).length > 0
+              ? Object.keys(sectionProgress)
+              : DEFAULT_SECTION_ORDER.filter(s => !['References and Appendix', 'References and Appendices', 'References'].includes(s) || s === 'References and Appendix')
+            ).map(section => {
+              const status = sectionProgress[section] ?? 'pending';
+              return (
+                <div key={section} className="flex items-center gap-3 px-4 py-3">
+                  <StatusIcon status={status} />
+                  <span className={`text-sm flex-1 font-medium ${
+                    status === 'pending' ? 'text-white/30' : 'text-white/80'
+                  }`}>
+                    {section}
+                  </span>
+                  <span className={`text-xs font-mono ${statusColor(status)}`}>
+                    {statusLabel(status)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
 
           {/* Animated dots */}
@@ -505,19 +528,223 @@ export default function Evaluate() {
 
             {/* Institution */}
             <div>
-              <label className="block text-xs font-medium text-white/60 mb-2">Institution</label>
+              <label className="block text-xs font-medium text-white/60 mb-2">Institution / Rubric</label>
               <select
                 value={institution}
-                onChange={e => setInstitution(e.target.value)}
+                onChange={e => { setInstitution(e.target.value); setCustomRubric(null); setGuidelineFile(null); }}
                 className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-blue-400 transition-colors"
               >
                 {INSTITUTIONS.map(inst => (
                   <option key={inst.code} value={inst.code} className="bg-slate-800">
+                    {inst.type === 'official' ? '🏛 ' : inst.type === 'general' ? '🇳🇬 ' : '🎓 '}
                     {inst.label}
                   </option>
                 ))}
               </select>
+              {institution !== 'nmcn' && (
+                <p className="text-xs text-white/30 mt-1.5">
+                  {institution === 'nigeria_general'
+                    ? 'Uses the standard Nigerian 5-chapter project rubric (100 marks)'
+                    : `Inherits from General Nigerian rubric. Upload a department guideline below to customize.`}
+                </p>
+              )}
             </div>
+
+            {/* Guideline Upload (non-NMCN institutions only) */}
+            {institution !== 'nmcn' && (
+              <div className="border border-dashed border-white/20 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-white/60">
+                    📋 Department Guideline <span className="text-white/30">(Optional)</span>
+                  </label>
+                  {customRubric && (
+                    <button
+                      onClick={() => { setCustomRubric(null); setGuidelineFile(null); setRubricWarnings([]); }}
+                      className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {!customRubric ? (
+                  <div>
+                    <input
+                      type="file"
+                      accept=".pdf,.docx"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        setGuidelineFile(f);
+                        setRubricExtracting(true);
+                        setRubricWarnings([]);
+                        try {
+                          const formData = new FormData();
+                          formData.append('file', f);
+                          const res = await fetch(`${API_URL}/api/rubric/extract?institution_name=${encodeURIComponent(f.name)}`, {
+                            method: 'POST',
+                            body: formData,
+                            signal: AbortSignal.timeout(30000),
+                          });
+                          if (!res.ok) {
+                            const err = await res.json().catch(() => ({}));
+                            throw new Error(err.detail || 'Extraction failed');
+                          }
+                          const data = await res.json();
+                          setCustomRubric(data.rubric);
+                          setRubricConfidence(data.confidence || 0);
+                          setRubricWarnings(data.warnings || []);
+                          setShowRubricPreview(true);
+                        } catch (err: any) {
+                          setRubricWarnings([err.message || 'Failed to extract rubric']);
+                          setGuidelineFile(null);
+                        } finally {
+                          setRubricExtracting(false);
+                        }
+                      }}
+                      className="w-full text-sm text-white/60 file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-white/10 file:text-white/80 hover:file:bg-white/20 file:cursor-pointer file:transition-colors"
+                    />
+                    <p className="text-xs text-white/30 mt-1.5">
+                      Upload your department handbook or scoring guide (PDF/DOCX). We'll extract the rubric automatically.
+                    </p>
+                    {rubricExtracting && (
+                      <div className="flex items-center gap-2 mt-2">
+                        <div className="w-4 h-4 rounded-full border-2 border-transparent border-t-blue-400 animate-spin"></div>
+                        <span className="text-xs text-blue-300/60">Extracting rubric...</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-emerald-400 font-semibold">✓ Custom rubric loaded</span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
+                          rubricConfidence >= 0.75 ? 'bg-green-500/20 text-green-300 border-green-500/30' :
+                          rubricConfidence >= 0.55 ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' :
+                                                     'bg-red-500/20 text-red-300 border-red-500/30'
+                        }`}>
+                          {rubricConfidence >= 0.75 ? 'High' : rubricConfidence >= 0.55 ? 'Medium' : 'Low'} confidence
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => setShowRubricPreview(true)}
+                        className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                      >
+                        Edit Rubric
+                      </button>
+                    </div>
+                    {guidelineFile && (
+                      <p className="text-xs text-white/40">From: {guidelineFile.name}</p>
+                    )}
+                  </div>
+                )}
+
+                {rubricWarnings.length > 0 && !showRubricPreview && (
+                  <div className="space-y-1">
+                    {rubricWarnings.map((w, i) => (
+                      <p key={i} className="text-xs text-amber-400/80">⚠ {w}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── RUBRIC PREVIEW MODAL ──────────────────────────────── */}
+            {showRubricPreview && customRubric && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                <div className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                  <div className="flex items-center justify-between p-6 border-b border-white/10">
+                    <div>
+                      <h3 className="text-lg font-bold text-white">📋 Rubric Preview</h3>
+                      <p className="text-xs text-white/40 mt-0.5">Review and edit extracted marks before evaluation</p>
+                    </div>
+                    <button onClick={() => setShowRubricPreview(false)} className="text-white/40 hover:text-white text-2xl">&times;</button>
+                  </div>
+
+                  <div className="p-6 space-y-4">
+                    {/* Warnings */}
+                    {rubricWarnings.length > 0 && (
+                      <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 space-y-1">
+                        {rubricWarnings.map((w, i) => (
+                          <p key={i} className="text-xs text-amber-300">⚠ {w}</p>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Total */}
+                    <div className="flex items-center justify-between px-3 py-2 bg-white/5 rounded-lg">
+                      <span className="text-sm font-semibold text-white">Total Marks</span>
+                      <span className="text-lg font-bold text-blue-400">{customRubric.total_marks}</span>
+                    </div>
+
+                    {/* Section table — editable marks */}
+                    <div className="space-y-2">
+                      {Object.entries(customRubric.sections || {}).map(([name, data]: [string, any]) => (
+                        <div key={name} className="flex items-center justify-between bg-white/5 border border-white/10 rounded-lg px-4 py-3">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-white truncate">{name}</p>
+                            <p className="text-xs text-white/40">{Object.keys(data.criteria || {}).length} criteria</p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={data.total}
+                              onChange={(e) => {
+                                const newVal = parseFloat(e.target.value) || 0;
+                                setCustomRubric((prev: any) => {
+                                  const updated = JSON.parse(JSON.stringify(prev));
+                                  updated.sections[name].total = newVal;
+                                  updated.total_marks = Object.values(updated.sections).reduce((sum: number, s: any) => sum + (s.total || 0), 0);
+                                  return updated;
+                                });
+                              }}
+                              className="w-16 bg-white/10 border border-white/20 rounded-lg px-2 py-1.5 text-sm text-white text-center focus:outline-none focus:border-blue-400"
+                            />
+                            <span className="text-xs text-white/40">marks</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Confidence */}
+                    {customRubric._extraction_meta?.section_confidences && (
+                      <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                        <p className="text-xs font-semibold text-white/60 mb-2">Section Confidence</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {Object.entries(customRubric._extraction_meta.section_confidences).map(([key, conf]: [string, any]) => (
+                            <span key={key} className={`text-xs px-2 py-0.5 rounded-full border ${
+                              conf >= 0.7 ? 'bg-green-500/20 text-green-300 border-green-500/30' :
+                              conf >= 0.5 ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' :
+                                            'bg-red-500/20 text-red-300 border-red-500/30'
+                            }`}>
+                              {key}: {Math.round(conf * 100)}%
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex gap-3 px-6 pb-6">
+                    <button
+                      onClick={() => setShowRubricPreview(false)}
+                      className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-blue-600/80 to-indigo-600/80 hover:from-blue-500 hover:to-indigo-500 text-white text-sm font-semibold transition-all"
+                    >
+                      Use This Rubric
+                    </button>
+                    <button
+                      onClick={() => { setCustomRubric(null); setGuidelineFile(null); setShowRubricPreview(false); setRubricWarnings([]); }}
+                      className="px-6 py-2.5 rounded-xl bg-white/10 text-white/80 hover:bg-white/15 text-sm transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Feedback Style */}
             <div>

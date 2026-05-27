@@ -1,0 +1,6 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "University of Lagos",
+  "institution_code": "unilag",
+  "overrides": {}
+}
