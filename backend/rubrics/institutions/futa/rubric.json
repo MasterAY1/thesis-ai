@@ -2,5 +2,6 @@
   "extends": "nigeria_general",
   "institution_name": "Federal University of Technology, Akure",
   "institution_code": "futa",
+  "school_type": "public",
   "overrides": {}
 }

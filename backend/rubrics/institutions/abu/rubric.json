@@ -1,7 +1,7 @@
 {
   "extends": "nigeria_general",
-  "institution_name": "University of Lagos",
-  "institution_code": "unilag",
+  "institution_name": "Ahmadu Bello University",
+  "institution_code": "abu",
   "school_type": "public",
   "overrides": {}
 }

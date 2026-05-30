@@ -184,6 +184,41 @@ def cache_stats():
     return get_cache().stats()
 
 
+@router.post("/evaluate/detect-institution")
+async def api_detect_institution(file: UploadFile = File(...)):
+    """
+    Scans the uploaded document and detects the institution, department, faculty, and project type.
+    """
+    if not (file.filename.lower().endswith('.pdf') or file.filename.lower().endswith('.docx')):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
+
+    MAX_FILE_SIZE = 15 * 1024 * 1024
+    if file.size and file.size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 15MB.")
+
+    job_id = str(uuid.uuid4())[:8]
+    file_path = os.path.join(UPLOAD_DIR, f"detect_{job_id}_{file.filename}")
+    try:
+        file_bytes = await file.read()
+        with open(file_path, "wb") as buffer:
+            buffer.write(file_bytes)
+
+        extracted_text = extract_text(file_path)
+        if not extracted_text:
+            raise HTTPException(status_code=500, detail="Failed to extract text from file.")
+
+        from services.institution_detector import detect_institution
+        result = detect_institution(extracted_text)
+        return result
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
 # ── Async Evaluation ───────────────────────────────────────────────────────────
 
 @router.post("/evaluate")
@@ -226,13 +261,37 @@ async def evaluate_document(
         # Read file bytes for hash check
         file_bytes = await file.read()
 
+        # ── Save temporary file and extract text early ─────────────────────────
+        with open(file_path, "wb") as buffer:
+            buffer.write(file_bytes)
+
+        extracted_text = extract_text(file_path)
+        if not extracted_text:
+            raise HTTPException(status_code=500, detail="Failed to extract text from file.")
+
+        # Detect institution from the extracted text
+        from services.institution_detector import detect_institution
+        detection = detect_institution(extracted_text)
+
+        # Substitute the actual institution for "auto" mode
+        resolved_institution = institution
+        if institution == "auto":
+            if detection["confidence"] >= 0.85:
+                resolved_institution = detection["institution"]
+                logger.info(f"Job {job_id}: auto-detected and selected '{resolved_institution}'")
+            else:
+                resolved_institution = "nigeria_general"
+                logger.info(f"Job {job_id}: auto-detection confidence low. Selecting 'nigeria_general'")
+
         # ── Document hash cache check ──────────────────────────────────────────
         cache = get_cache()
-        cache_key = cache.make_key(file_bytes, evaluation_mode, institution)
+        cache_key = cache.make_key(file_bytes, evaluation_mode, resolved_institution)
         cached_result = cache.get(cache_key)
 
         if cached_result is not None:
             logger.info(f"Cache HIT for job {job_id}: returning cached result instantly")
+            if os.path.exists(file_path):
+                os.remove(file_path)
             return {
                 "status":    "completed",
                 "job_id":    job_id,
@@ -246,15 +305,6 @@ async def evaluate_document(
                     "cached":           True,
                 },
             }
-
-        # ── Save file and extract text ─────────────────────────────────────────
-        with open(file_path, "wb") as buffer:
-            buffer.write(file_bytes)
-
-        extracted_text = extract_text(file_path)
-
-        if not extracted_text:
-            raise HTTPException(status_code=500, detail="Failed to extract text from file.")
 
         logger.info(f"Job {job_id}: Extracted {len(extracted_text)} chars from {file.filename}")
 
@@ -270,6 +320,21 @@ async def evaluate_document(
             "error":            None,
             "_cache_key":       cache_key,
             "_extracted_length": len(extracted_text),
+            "evaluation_context": {
+                "institution": resolved_institution,
+                "faculty": detection.get("faculty", "unknown"),
+                "department": detection.get("department", "unknown"),
+                "school_type": detection.get("school_type", "public"),
+                "project_type": detection.get("project_type", "thesis"),
+                "rubric": resolved_institution,
+                "confidence": detection.get("confidence", 0.0),
+                "method": detection.get("method", "fallback"),
+                "matched_phrases": detection.get("matched_phrases", []),
+                "detected_institution": detection.get("institution", "nigeria_general"),
+                "selected_rubric": resolved_institution,
+                "rubric_source_type": detection.get("school_type", "general"),
+                "detection_method": detection.get("method", "fallback"),
+            }
         }
 
         # Parse custom rubric if provided
@@ -279,14 +344,14 @@ async def evaluate_document(
                 parsed_custom_rubric = json.loads(custom_rubric)
                 is_valid, _ = validate_rubric(parsed_custom_rubric)
                 if not is_valid:
-                    logger.warning(f"Job {job_id}: Custom rubric invalid, falling back to {institution}")
+                    logger.warning(f"Job {job_id}: Custom rubric invalid, falling back to {resolved_institution}")
                     parsed_custom_rubric = None
             except json.JSONDecodeError:
-                logger.warning(f"Job {job_id}: Custom rubric JSON parse failed, falling back to {institution}")
+                logger.warning(f"Job {job_id}: Custom rubric JSON parse failed, falling back to {resolved_institution}")
 
         thread = threading.Thread(
             target=_run_evaluation,
-            args=(job_id, extracted_text, file_path, institution, feedback_style, evaluation_mode, debug, parsed_custom_rubric),
+            args=(job_id, extracted_text, file_path, resolved_institution, feedback_style, evaluation_mode, debug, parsed_custom_rubric),
             daemon=True,
         )
         thread.start()
@@ -352,6 +417,7 @@ def _run_evaluation(
         jobs[job_id]["status"]   = "completed"
         jobs[job_id]["progress"] = "Evaluation complete."
         jobs[job_id]["results"]  = result
+        jobs[job_id]["evaluation_context"] = result.get("evaluation_context")
         logger.info(f"Job {job_id}: Completed successfully.")
 
     except Exception as e:
@@ -386,6 +452,7 @@ def get_job_progress(job_id: str):
         "evaluation_mode":  job.get("evaluation_mode", "fast"),
         "section_progress": job.get("section_progress", {}),
         "detected_sections": job.get("detected_sections", []),
+        "evaluation_context": job.get("evaluation_context"),
     }
 
 
@@ -408,6 +475,7 @@ def get_job_status(job_id: str):
         "filename":         job["filename"],
         "evaluation_mode":  job.get("evaluation_mode", "fast"),
         "section_progress": job.get("section_progress", {}),
+        "evaluation_context": job.get("evaluation_context"),
     }
 
     if job["status"] == "completed":

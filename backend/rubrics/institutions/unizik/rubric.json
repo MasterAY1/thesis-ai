@@ -1,0 +1,7 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "Nnamdi Azikiwe University",
+  "institution_code": "unizik",
+  "school_type": "public",
+  "overrides": {}
+}

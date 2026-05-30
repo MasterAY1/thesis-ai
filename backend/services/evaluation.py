@@ -14,6 +14,7 @@ Same document uploaded 10 times → nearly identical scores (±1 max).
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -32,6 +33,8 @@ from .feedback_styles import get_style_tone_modifier
 from .context_extractor import extract_relevant_context, MAX_SECTION_CHARS
 from .section_parser import parse_thesis_sections, get_extraction_confidences, MIN_SECTION_CHARS
 from .rule_engine import run_rule_checks
+from .institution_detector import detect_institution
+from .rubric_validator import validate_rubric
 
 logger = logging.getLogger("thesis_ai.evaluation")
 
@@ -112,6 +115,35 @@ Output STRICTLY as JSON:
   ]
 }}
 """
+
+
+def sanitize_prompt(prompt: str, institution: str) -> str:
+    """
+    Sanitizes prompt to prevent NMCN leakage during non-NMCN evaluations.
+    If the target institution is not NMCN, replaces any references to 'NMCN',
+    'Nursing and Midwifery Council of Nigeria', or related terms with appropriate generic or specific terms.
+    """
+    if not prompt:
+        return prompt
+    
+    if institution == "nmcn":
+        return prompt
+        
+    # Get the institution name if possible
+    inst_name = get_institution_name(institution) or "the institution"
+    
+    sanitized = prompt
+    sanitized = re.sub(r'\bNursing and Midwifery Council of Nigeria\b', inst_name, sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'\bNursing & Midwifery Council of Nigeria\b', inst_name, sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'\bNursing and Midwifery Council\b', inst_name, sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'\bNMCN\b', inst_name, sanitized)  # Case sensitive for the acronym
+    sanitized = re.sub(r'\bnmcn\b', inst_name.lower(), sanitized)
+    
+    # Ensure there's absolutely no NMCN reference left
+    if "nmcn" in sanitized.lower():
+        sanitized = re.sub(r'nmcn', inst_name, sanitized, flags=re.IGNORECASE)
+        
+    return sanitized
 
 
 # ── Missing section result ─────────────────────────────────────────────────────
@@ -201,12 +233,16 @@ async def _evaluate_section_async(
         institution_name=institution_name,
     ) + f"\n\nTONE: {tone_modifier}"
 
+    # Apply prompt sanitization guardrail for non-NMCN evaluations
+    system_prompt = sanitize_prompt(system_prompt, institution)
+
     # ── Chunking for very large sections ──────────────────────────────────────
     section_chunks = chunk_text(trimmed_text, chunk_size=6000, overlap=500)
 
     try:
         if len(section_chunks) <= 1:
             user_prompt = f"Review this section of the student's thesis:\n\n{section_name}:\n{trimmed_text}"
+            user_prompt = sanitize_prompt(user_prompt, institution)
             router = get_router()
 
             ai_result = await asyncio.to_thread(
@@ -242,6 +278,7 @@ async def _evaluate_section_async(
 
             async def eval_chunk(i: int, chunk: str) -> Dict:
                 up = f"Review this section of the student's thesis (part {i + 1}/{len(section_chunks)}):\n\n{section_name}:\n{chunk}"
+                up = sanitize_prompt(up, institution)
                 return await asyncio.to_thread(
                     router.generate, system_prompt, up,
                     "section_evaluation", evaluation_mode
@@ -427,7 +464,63 @@ async def evaluate_thesis_async(
                 f"Evaluating sections… {completed}/{total} complete"
             )
 
-    # ── 1. Detect document type (deterministic, no AI) ────────────────────────
+    # ── 1. Detect institution & department (deterministic, no AI) ─────────────
+    t_det = time.monotonic()
+    if progress_store is not None:
+        progress_store["progress"] = "Detecting institution and department..."
+
+    detection = detect_institution(text)
+    timings["detection_s"] = round(time.monotonic() - t_det, 3)
+
+    # Resolve the active institution
+    actual_institution = institution
+    if institution == "auto":
+        if detection["confidence"] >= 0.85:
+            actual_institution = detection["institution"]
+            logger.info(f"Auto-selected detected institution '{actual_institution}' (confidence={detection['confidence']})")
+        else:
+            actual_institution = "nigeria_general"
+            logger.info(f"Auto-select confidence too low ({detection['confidence']} < 0.85). Falling back to nigeria_general.")
+
+    # Load and validate rubric with overrides
+    try:
+        rubric_data = load_rubric_with_override(actual_institution, custom_rubric)
+        is_valid, validation_errors = validate_rubric(rubric_data)
+        if not is_valid:
+            logger.warning(
+                f"Rubric validation failed for '{actual_institution}', falling back to 'nigeria_general'. "
+                f"Errors: {[str(e) for e in validation_errors]}"
+            )
+            rubric_data = load_rubric("nigeria_general")
+            actual_institution = "nigeria_general"
+    except Exception as e:
+        logger.error(f"Error loading or validating rubric for '{actual_institution}': {e}")
+        rubric_data = load_rubric("nigeria_general")
+        actual_institution = "nigeria_general"
+
+    # Build locked evaluation context
+    evaluation_context = {
+        "institution": actual_institution,
+        "faculty": detection.get("faculty", "unknown"),
+        "department": detection.get("department", "unknown"),
+        "school_type": rubric_data.get("school_type", detection.get("school_type", "public")),
+        "project_type": detection.get("project_type", "thesis"),
+        "rubric": actual_institution,
+        "rubric_source": rubric_data.get("institution_code", actual_institution),
+        "confidence": detection.get("confidence", 0.0),
+        "method": detection.get("method", "fallback"),
+        "matched_phrases": detection.get("matched_phrases", []),
+        "detected_institution": detection.get("institution", "nigeria_general"),
+        "selected_rubric": actual_institution,
+        "rubric_source_type": rubric_data.get("type", "general"),
+        "detection_method": detection.get("method", "fallback"),
+    }
+
+    # Freeze evaluation context in progress store
+    if progress_store is not None:
+        progress_store["evaluation_context"] = evaluation_context
+
+    # ── 2. Detect document type (deterministic, no AI) ────────────────────────
     t0 = time.monotonic()
     if progress_store is not None:
         progress_store["progress"] = "Detecting document type…"
@@ -442,7 +535,7 @@ async def evaluate_thesis_async(
         f"skip={skip_keys}, took {timings['classification_s']}s"
     )
 
-    # ── 2. DETERMINISTIC section extraction (regex, NO AI) ────────────────────
+    # ── 3. DETERMINISTIC section extraction (regex, NO AI) ────────────────────
     t0 = time.monotonic()
     if progress_store is not None:
         progress_store["progress"] = "Parsing document sections…"
@@ -457,20 +550,19 @@ async def evaluate_thesis_async(
         progress_store["detected_sections"] = detected
     logger.info(f"Sections parsed in {timings['extraction_s']}s: {detected}")
 
-    # ── 3. RULE ENGINE — deterministic checks (NO AI) ─────────────────────────
+    # ── 4. RULE ENGINE — deterministic checks (NO AI) ─────────────────────────
     t0 = time.monotonic()
     if progress_store is not None:
         progress_store["progress"] = "Running checklist validation…"
 
-    rule_issues = await asyncio.to_thread(run_rule_checks, sections)
+    rule_issues = await asyncio.to_thread(run_rule_checks, sections, actual_institution, rubric_data)
     timings["rule_engine_s"] = round(time.monotonic() - t0, 2)
     logger.info(f"Rule engine: {len(rule_issues)} deterministic issues in {timings['rule_engine_s']}s")
 
-    # ── 4. Build section task list for AI evaluation ──────────────────────────
-    rubric_data = load_rubric_with_override(institution, custom_rubric)
-    section_map = get_section_mapping(institution, rubric=rubric_data)
-    inst_name = rubric_data.get("institution_name", get_institution_name(institution))
-    rubric_source = rubric_data.get("institution_code", institution)
+    # ── 5. Build section task list for AI evaluation ──────────────────────────
+    section_map = get_section_mapping(actual_institution, rubric=rubric_data)
+    inst_name = rubric_data.get("institution_name", get_institution_name(actual_institution))
+    rubric_source = rubric_data.get("institution_code", actual_institution)
 
     # Pre-populate section_progress
     if progress_store is not None:
@@ -495,7 +587,7 @@ async def evaluate_thesis_async(
             section_text=section_text,
             max_marks=max_marks,
             thesis_key=thesis_key,
-            institution=institution,
+            institution=actual_institution,
             feedback_style=feedback_style,
             evaluation_mode=evaluation_mode,
             progress_callback=_update_progress,
@@ -505,7 +597,7 @@ async def evaluate_thesis_async(
         section_tasks.append(coro)
         section_order.append(rubric_section)
 
-    # ── 5. Run ALL section evaluations in parallel ────────────────────────────
+    # ── 6. Run ALL section evaluations in parallel ────────────────────────────
     t0 = time.monotonic()
     if progress_store is not None:
         progress_store["progress"] = f"Running {len(section_tasks)} AI evaluations in parallel…"
@@ -515,7 +607,7 @@ async def evaluate_thesis_async(
     timings["section_evaluation_s"] = round(time.monotonic() - t0, 2)
     logger.info(f"All section evaluations completed in {timings['section_evaluation_s']}s")
 
-    # ── 6. Merge rule-engine + AI issues ──────────────────────────────────────
+    # ── 7. Merge rule-engine + AI issues ──────────────────────────────────────
     all_issues: List[Dict] = list(rule_issues)  # Rule engine issues first (deterministic)
 
     for i, result in enumerate(section_results):
@@ -527,13 +619,13 @@ async def evaluate_thesis_async(
         issues: List[Dict] = result or []
         all_issues.extend(issues)
 
-    # ── 7. Consistency verification (DEEP MODE only) ──────────────────────────
+    # ── 8. Consistency verification (DEEP MODE only) ──────────────────────────
     if evaluation_mode == "deep":
         t0 = time.monotonic()
         if progress_store is not None:
             progress_store["progress"] = "Verifying scoring consistency…"
 
-        first_scoring = calculate_score(all_issues, institution)
+        first_scoring = calculate_score(all_issues, actual_institution)
         first_score = first_scoring.get("overall_score", 0)
 
         all_issues = await _verify_consistency(
@@ -542,7 +634,7 @@ async def evaluate_thesis_async(
             rubric_data=rubric_data,
             first_score=first_score,
             first_issues=all_issues,
-            institution=institution,
+            institution=actual_institution,
             feedback_style=feedback_style,
             evaluation_mode=evaluation_mode,
             progress_callback=_update_progress,
@@ -550,7 +642,7 @@ async def evaluate_thesis_async(
         timings["consistency_s"] = round(time.monotonic() - t0, 2)
         logger.info(f"Consistency verification in {timings['consistency_s']}s")
 
-    # ── 8. Cross-Section Validation (DEEP MODE only) ──────────────────────────
+    # ── 9. Cross-Section Validation (DEEP MODE only) ──────────────────────────
     cross_validation_result: Dict[str, Any] = {
         "validations": [],
         "total_deductions": 0,
@@ -567,9 +659,9 @@ async def evaluate_thesis_async(
         timings["cross_validation_s"] = round(time.monotonic() - t0, 2)
         logger.info(f"Cross-validation completed in {timings['cross_validation_s']}s")
 
-    # ── 9. Deterministic Python scoring ──────────────────────────────────────
+    # ── 10. Deterministic Python scoring ──────────────────────────────────────
     t0 = time.monotonic()
-    scoring_result = calculate_score(all_issues, institution)
+    scoring_result = calculate_score(all_issues, actual_institution)
     scoring_result["overall_score"] -= cross_validation_result["total_deductions"]
     scoring_result["cross_validation"] = cross_validation_result
     timings["scoring_s"] = round(time.monotonic() - t0, 3)
@@ -583,13 +675,14 @@ async def evaluate_thesis_async(
         if scoring_result["overall_score"] > adjusted_total:
             scoring_result["overall_score"] = adjusted_total
 
-    # ── 10. Attach metadata ──────────────────────────────────────────────────
+    # ── 11. Attach metadata ──────────────────────────────────────────────────
     timings["total_s"] = round(time.monotonic() - pipeline_start, 2)
 
     scoring_result["sections"]               = sections
-    scoring_result["institution"]            = institution
+    scoring_result["institution"]            = actual_institution
     scoring_result["institution_name"]       = inst_name
     scoring_result["rubric_source"]          = rubric_source
+    scoring_result["evaluation_context"]     = evaluation_context
     scoring_result["document_type"]          = doc_classification
     scoring_result["feedback_style"]         = feedback_style
     scoring_result["extraction_confidences"] = extraction_confidences

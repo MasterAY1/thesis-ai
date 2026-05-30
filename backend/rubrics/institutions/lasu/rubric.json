@@ -2,5 +2,6 @@
   "extends": "nigeria_general",
   "institution_name": "Lagos State University",
   "institution_code": "lasu",
+  "school_type": "public",
   "overrides": {}
 }

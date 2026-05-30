@@ -1,0 +1,7 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "Covenant University",
+  "institution_code": "covenant",
+  "school_type": "private",
+  "overrides": {}
+}

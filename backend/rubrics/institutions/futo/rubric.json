@@ -1,0 +1,7 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "Federal University of Technology, Owerri",
+  "institution_code": "futo",
+  "school_type": "public",
+  "overrides": {}
+}

@@ -32,6 +32,14 @@ INSTITUTION_REGISTRY = [
     {"code": "unilag",          "name": "University of Lagos",                    "type": "institutional"},
     {"code": "oau",             "name": "Obafemi Awolowo University",             "type": "institutional"},
     {"code": "futa",            "name": "Federal University of Technology, Akure","type": "institutional"},
+    {"code": "ui",              "name": "University of Ibadan",                   "type": "institutional"},
+    {"code": "unn",             "name": "University of Nigeria, Nsukka",          "type": "institutional"},
+    {"code": "abu",             "name": "Ahmadu Bello University",                "type": "institutional"},
+    {"code": "covenant",        "name": "Covenant University",                    "type": "institutional"},
+    {"code": "babcock",         "name": "Babcock University",                     "type": "institutional"},
+    {"code": "futo",            "name": "Federal University of Technology, Owerri","type": "institutional"},
+    {"code": "uniben",          "name": "University of Benin",                    "type": "institutional"},
+    {"code": "unizik",          "name": "Nnamdi Azikiwe University",              "type": "institutional"},
 ]
 
 

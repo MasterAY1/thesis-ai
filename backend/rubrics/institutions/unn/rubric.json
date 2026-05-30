@@ -1,0 +1,7 @@
+{
+  "extends": "nigeria_general",
+  "institution_name": "University of Nigeria, Nsukka",
+  "institution_code": "unn",
+  "school_type": "public",
+  "overrides": {}
+}

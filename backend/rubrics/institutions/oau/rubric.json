@@ -2,5 +2,6 @@
   "extends": "nigeria_general",
   "institution_name": "Obafemi Awolowo University",
   "institution_code": "oau",
+  "school_type": "public",
   "overrides": {}
 }

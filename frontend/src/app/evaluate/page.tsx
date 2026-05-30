@@ -15,12 +15,21 @@ const FEEDBACK_STYLES = [
 ];
 
 const INSTITUTIONS = [
+  { code: 'auto',            label: '🔍 Auto-Detect Institution (Recommended)',  type: 'general' },
   { code: 'nmcn',            label: 'NMCN -- Nursing & Midwifery Council',       type: 'official' },
   { code: 'nigeria_general', label: 'General Nigerian University',                type: 'general' },
   { code: 'lasu',            label: 'LASU -- Lagos State University',             type: 'institutional' },
   { code: 'unilag',          label: 'UNILAG -- University of Lagos',              type: 'institutional' },
   { code: 'oau',             label: 'OAU -- Obafemi Awolowo University',          type: 'institutional' },
   { code: 'futa',            label: 'FUTA -- Federal Uni. of Technology, Akure',  type: 'institutional' },
+  { code: 'ui',              label: 'UI -- University of Ibadan',                 type: 'institutional' },
+  { code: 'unn',             label: 'UNN -- University of Nigeria, Nsukka',       type: 'indigo' },
+  { code: 'abu',             label: 'ABU -- Ahmadu Bello University',             type: 'institutional' },
+  { code: 'covenant',        label: 'Covenant University (Private)',              type: 'institutional' },
+  { code: 'babcock',         label: 'Babcock University (Private)',               type: 'institutional' },
+  { code: 'futo',            label: 'FUTO -- Federal Uni. of Technology, Owerri', type: 'institutional' },
+  { code: 'uniben',          label: 'UNIBEN -- University of Benin',              type: 'institutional' },
+  { code: 'unizik',          label: 'UNIZIK -- Nnamdi Azikiwe University',        type: 'institutional' },
 ];
 
 const EVALUATION_MODES = [
@@ -145,8 +154,73 @@ export default function Evaluate() {
   const [dragActive, setDragActive]   = useState(false);
   const [error, setError]             = useState<string | null>(null);
   const [feedbackStyle, setFeedbackStyle] = useState('friendly_lecturer');
-  const [institution, setInstitution] = useState('nmcn');
+  const [institution, setInstitution] = useState('auto');
   const [evalMode, setEvalMode]       = useState<'fast' | 'deep'>('fast');
+
+  // Automatic institution detection state
+  const [detectingInst, setDetectingInst] = useState(false);
+  const [detectionResult, setDetectionResult] = useState<any>(null);
+  const [showOverrideSelect, setShowOverrideSelect] = useState(false);
+
+  // Restore re-evaluation document if set in localStorage
+  useEffect(() => {
+    const reEvalText = localStorage.getItem('reEvaluateText');
+    const reEvalName = localStorage.getItem('reEvaluateName') || 'restored_document.docx';
+    if (reEvalText) {
+      // Create a virtual file to represent the restored state
+      const virtualFile = new File([reEvalText], reEvalName, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      setFile(virtualFile);
+      // Clean up localStorage so it doesn't persist forever
+      localStorage.removeItem('reEvaluateText');
+      localStorage.removeItem('reEvaluateName');
+      
+      // Open manual override selector automatically
+      setShowOverrideSelect(true);
+    }
+  }, []);
+
+  // Automatic detection trigger when file changes
+  useEffect(() => {
+    if (!file) {
+      setDetectionResult(null);
+      return;
+    }
+
+    // Skip detection if it's a restored virtual file that we already want to manually override
+    if (file.name === 'restored_document.docx' || showOverrideSelect) {
+      return;
+    }
+
+    const runDetection = async () => {
+      setDetectingInst(true);
+      setDetectionResult(null);
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch(`${API_URL}/api/evaluate/detect-institution`, {
+          method: 'POST',
+          body: formData,
+          signal: AbortSignal.timeout(20000),
+        });
+        if (!res.ok) {
+          throw new Error('Detection failed');
+        }
+        const data = await res.json();
+        setDetectionResult(data);
+
+        // Auto-select if confidence is high (>= 85%)
+        if (data.confidence >= 0.85) {
+          setInstitution(data.institution);
+        }
+      } catch (err) {
+        console.error('Detection failed:', err);
+      } finally {
+        setDetectingInst(false);
+      }
+    };
+
+    runDetection();
+  }, [file]);
 
   // Live progress state
   const [progressMessage, setProgressMessage] = useState('');
@@ -809,17 +883,164 @@ export default function Evaluate() {
               </div>
             )}
 
+            {/* ── INSTITUTION AUTO-DETECTION PANEL ──────────────────────── */}
+            {file && (detectingInst || detectionResult) && (
+              <div className="mt-4 p-5 bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-blue-300 uppercase tracking-widest">
+                    🔍 Institution Auto-Detection
+                  </span>
+                  {detectingInst && (
+                    <span className="flex items-center gap-1 text-xs text-blue-400">
+                      <span className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0"></span>
+                      Scanning cover page...
+                    </span>
+                  )}
+                </div>
+
+                {detectingInst && (
+                  <div className="h-12 w-full bg-white/5 rounded-lg animate-pulse flex items-center justify-center text-xs text-white/40">
+                    Extracting title and university metadata...
+                  </div>
+                )}
+
+                {!detectingInst && detectionResult && (
+                  <div className="space-y-3">
+                    {/* Banner by confidence */}
+                    {detectionResult.confidence >= 0.85 ? (
+                      <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex items-start gap-2.5">
+                        <span className="text-lg shrink-0 mt-0.5">✅</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-emerald-400">
+                            Auto-Selected Rubric: {INSTITUTIONS.find(i => i.code === detectionResult.institution)?.label?.split(' -- ')[1] || detectionResult.institution.toUpperCase()}
+                          </p>
+                          <p className="text-xs text-white/50 leading-relaxed mt-0.5">
+                            We detected this document belongs to {INSTITUTIONS.find(i => i.code === detectionResult.institution)?.label?.split(' -- ')[0] || detectionResult.institution.toUpperCase()} with <strong>{Math.round(detectionResult.confidence * 100)}% confidence</strong>.
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setShowOverrideSelect(true)}
+                          className="px-2.5 py-1 text-xs font-semibold rounded bg-white/10 text-white/80 hover:bg-white/20 transition-colors shrink-0"
+                        >
+                          Change
+                        </button>
+                      </div>
+                    ) : detectionResult.confidence >= 0.60 ? (
+                      <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg flex items-start gap-2.5">
+                        <span className="text-lg shrink-0 mt-0.5">💡</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-amber-400">
+                            We detected {INSTITUTIONS.find(i => i.code === detectionResult.institution)?.label?.split(' -- ')[0] || detectionResult.institution.toUpperCase()} ({Math.round(detectionResult.confidence * 100)}%)
+                          </p>
+                          <p className="text-xs text-white/50 leading-relaxed mt-0.5">
+                            Do you want to evaluate using the {INSTITUTIONS.find(i => i.code === detectionResult.institution)?.label?.split(' -- ')[1] || detectionResult.institution.toUpperCase()} rubric?
+                          </p>
+                          <div className="flex gap-2 mt-2">
+                            <button
+                              onClick={() => {
+                                setInstitution(detectionResult.institution);
+                                // Override the results to 100% confidence manually since user confirmed
+                                setDetectionResult((prev: any) => ({ ...prev, confidence: 1.0 }));
+                              }}
+                              className="px-3 py-1 text-xs font-semibold rounded bg-amber-500 text-slate-900 hover:bg-amber-400 transition-colors"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setShowOverrideSelect(true)}
+                              className="px-3 py-1 text-xs font-semibold rounded bg-white/10 text-white/80 hover:bg-white/20 transition-colors"
+                            >
+                              Change Rubric
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-slate-500/10 border border-slate-500/20 rounded-lg flex items-start gap-2.5">
+                        <span className="text-lg shrink-0 mt-0.5">ℹ️</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-slate-300">
+                            No Specific Institution Detected
+                          </p>
+                          <p className="text-xs text-white/50 leading-relaxed mt-0.5">
+                            We'll use the <strong>General Nigerian University</strong> rubric. You can override this manually if you prefer.
+                          </p>
+                          <button
+                            onClick={() => setShowOverrideSelect(true)}
+                            className="mt-2 px-3 py-1 text-xs font-semibold rounded bg-white/10 text-white/80 hover:bg-white/20 transition-colors"
+                          >
+                            Select School Manually
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Matched evidence preview */}
+                    {detectionResult.matched_phrases?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-white/5">
+                        <span className="text-[10px] uppercase font-bold text-white/40 mt-1 shrink-0">
+                          Matched Evidence:
+                        </span>
+                        {detectionResult.matched_phrases.map((phrase: string, i: number) => (
+                          <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-white/5 border border-white/10 text-white/60">
+                            "{phrase}"
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {showOverrideSelect && (
+                  <div className="pt-3 border-t border-white/5 space-y-2">
+                    <label className="block text-[11px] font-medium text-white/60">
+                      Select Institution Manually:
+                    </label>
+                    <div className="flex gap-2">
+                      <select
+                        value={institution}
+                        onChange={e => {
+                          setInstitution(e.target.value);
+                          setCustomRubric(null);
+                          setGuidelineFile(null);
+                        }}
+                        className="flex-1 bg-slate-800 border border-white/20 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-400"
+                      >
+                        {INSTITUTIONS.map(inst => (
+                          <option key={inst.code} value={inst.code}>
+                            {inst.type === 'official' ? '🏛 ' : inst.type === 'general' ? '🇳🇬 ' : '🎓 '}
+                            {inst.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => setShowOverrideSelect(false)}
+                        className="px-3 py-2 bg-white/10 rounded-lg text-xs font-semibold text-white/80 hover:bg-white/15"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Submit button */}
             <button
               onClick={handleUpload}
-              disabled={!file}
+              disabled={!file || detectingInst}
               className={`mt-6 w-full py-4 rounded-xl text-base font-semibold transition-all duration-300 flex items-center justify-center gap-2 ${
-                file
+                file && !detectingInst
                   ? 'bg-gradient-to-r from-blue-500 to-indigo-500 hover:from-blue-400 hover:to-indigo-400 text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.01]'
                   : 'bg-white/10 text-white/30 cursor-not-allowed'
               }`}
             >
-              {file ? (
+              {detectingInst ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>
+                  <span>Analyzing Cover Page...</span>
+                </>
+              ) : file ? (
                 <>
                   {evalMode === 'fast' ? '⚡' : '🔬'}
                   <span>Start {evalMode === 'fast' ? 'Fast' : 'Deep'} Evaluation</span>

@@ -363,6 +363,110 @@ export default function Results() {
               </div>
             </div>
 
+            {/* ── Evaluation Transparency Grid ──────────────────────── */}
+            {r?.evaluation_context && (
+              <div className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-bold">Evaluation Transparency Grid</h2>
+                  <span className="text-xs px-2.5 py-1 bg-blue-500/20 border border-blue-500/30 text-blue-300 rounded-full font-semibold">
+                    🔒 Context Locked
+                  </span>
+                </div>
+                
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {/* Column 1: Institution */}
+                  <div className="p-4 bg-white/[0.03] border border-white/5 rounded-xl space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-white/40 tracking-wider">Institution</span>
+                    <p className="text-sm font-semibold text-white truncate">
+                      {r.institution_name || r.evaluation_context.institution.toUpperCase()}
+                    </p>
+                    <p className="text-xs text-white/30 truncate">
+                      Type: {r.evaluation_context.school_type}
+                    </p>
+                  </div>
+
+                  {/* Column 2: Department & Faculty */}
+                  <div className="p-4 bg-white/[0.03] border border-white/5 rounded-xl space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-white/40 tracking-wider">Department</span>
+                    <p className="text-sm font-semibold text-white truncate">
+                      {r.evaluation_context.department === 'unknown' 
+                        ? 'General Department' 
+                        : r.evaluation_context.department.split('_').slice(2).map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || r.evaluation_context.department}
+                    </p>
+                    <p className="text-xs text-white/30 truncate">
+                      Faculty: {r.evaluation_context.faculty.split('_').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
+                    </p>
+                  </div>
+
+                  {/* Column 3: Rubric Source */}
+                  <div className="p-4 bg-white/[0.03] border border-white/5 rounded-xl space-y-1">
+                    <span className="text-[10px] uppercase font-bold text-white/40 tracking-wider">Rubric Ruleset</span>
+                    <p className="text-sm font-semibold text-white truncate">
+                      {r.evaluation_context.rubric === 'nigeria_general' ? 'Nigeria General' : r.evaluation_context.rubric.toUpperCase()}
+                    </p>
+                    <p className="text-xs text-white/30 truncate">
+                      Source: {r.evaluation_context.rubric_source_type}
+                    </p>
+                  </div>
+
+                  {/* Column 4: Detection Confidence & Evidence */}
+                  <div className="group relative p-4 bg-white/[0.03] border border-white/5 rounded-xl space-y-1 cursor-pointer hover:bg-white/[0.06] hover:border-blue-500/30 transition-all">
+                    <span className="text-[10px] uppercase font-bold text-white/40 tracking-wider">Auto-Detect</span>
+                    <p className="text-sm font-semibold text-white flex items-center gap-1.5">
+                      📊 {Math.round(r.evaluation_context.confidence * 100)}% Match
+                    </p>
+                    <p className="text-xs text-blue-400 group-hover:text-blue-300 font-semibold flex items-center gap-0.5">
+                      👁️ View Evidence
+                    </p>
+
+                    {/* Matched Evidence Hover Popover / Tooltip */}
+                    <div className="absolute left-1/2 bottom-[105%] -translate-x-1/2 w-64 bg-slate-900 border border-white/10 rounded-xl p-4 shadow-2xl space-y-2.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-all z-20">
+                      <p className="text-xs font-bold text-blue-300 uppercase tracking-widest border-b border-white/10 pb-1.5">
+                        Matched Title Page Evidence
+                      </p>
+                      <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                        {r.evaluation_context.matched_phrases?.length > 0 ? (
+                          r.evaluation_context.matched_phrases.map((phrase: string, idx: number) => (
+                            <div key={idx} className="text-xs text-white/80 font-mono bg-white/5 px-2 py-1 rounded border border-white/5">
+                              "{phrase}"
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-white/40">No exact keywords matched. Fallback general rules applied.</p>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-white/30">
+                        Method: {r.evaluation_context.method}
+                      </div>
+                      <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-slate-900 z-10" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Wrong Institution Re-evaluate override button */}
+                <div className="pt-3 border-t border-white/5 flex items-center justify-between text-xs">
+                  <span className="text-white/40">
+                    Faculty: <strong>{r.evaluation_context.faculty.split('_').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}</strong> &middot; 
+                    Project Type: <strong>{r.evaluation_context.project_type.split('_').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}</strong>
+                  </span>
+                  
+                  <button
+                    onClick={() => {
+                      // Restoring doc state
+                      const docText = Object.values(r.sections || {}).join('\n\n');
+                      localStorage.setItem('reEvaluateText', docText);
+                      localStorage.setItem('reEvaluateName', results.filename || 're_evaluation_document.docx');
+                      router.push('/evaluate');
+                    }}
+                    className="text-blue-400 hover:text-blue-300 font-semibold hover:underline flex items-center gap-1"
+                  >
+                    <span>Wrong Institution? Re-evaluate</span>
+                    <span>→</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* ── Score Breakdown ───────────────────────────────────── */}
             {r?.breakdown && (
               <div className="bg-white/5 border border-white/10 rounded-2xl p-6">

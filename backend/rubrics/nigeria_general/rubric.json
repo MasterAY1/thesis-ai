@@ -1,6 +1,7 @@
 {
   "institution_name": "General Nigerian University",
   "institution_code": "nigeria_general",
+  "school_type": "public",
   "total_marks": 100,
   "sections": {
     "Preliminary Pages": {
